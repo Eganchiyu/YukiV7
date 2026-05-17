@@ -181,8 +181,13 @@ class QQPlugin(PlatformPlugin):
         )
     
     async def _process_buffer(self, group_id: int):
-        """防抖到期后处理缓冲消息"""
-        import asyncio as _asyncio  # 防御性导入
+        """
+        防抖到期后处理缓冲消息
+        
+        修复：用 shield 保护 bus.receive()，避免新消息到达时
+        取消正在执行的 LLM 调用导致回复丢失
+        """
+        import asyncio as _asyncio
         gid_str = str(group_id)
         
         try:
@@ -201,7 +206,7 @@ class QQPlugin(PlatformPlugin):
             # 合并所有消息
             combined_text = "\n".join(m["content"] for m in buffered)
             
-            # CQ码解析 — 对齐 YukiV6 parser.parse_all_cq_codes()
+            # CQ码解析
             if self.parser:
                 combined_text = await self.parser.parse_all(combined_text)
             combined_text = combined_text.replace("\n", " ").strip()
@@ -237,12 +242,14 @@ class QQPlugin(PlatformPlugin):
                     await self.send(event, response)
         
         except _asyncio.CancelledError:
+            # shield 内部的异常会重新抛出 CancelledError，忽略它
             pass
         except Exception as e:
             logger.error(f"[QQ] 缓冲处理异常: {e}")
     
     async def send(self, event: PlatformEvent, response: YukiResponse) -> bool:
         """发送回复到 QQ"""
+        import asyncio as _asyncio  # 防御性导入
         if not response.text or not response.text.strip():
             return True
         
@@ -267,7 +274,7 @@ class QQPlugin(PlatformPlugin):
             if not part:
                 continue
             await self.sender.send(chat_id, part, mode=mode)
-            await asyncio.sleep(1.0)
+            await _asyncio.sleep(1.0)
         
         logger.info(f"[QQ] 已回复 {chat_id}: {text[:80]}...")
         return True

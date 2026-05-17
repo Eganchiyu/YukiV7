@@ -170,7 +170,7 @@ class YukiMemory:
                 "source": source,
             }
             if session_id:
-                meta["session_id"] = str(session_id)
+                meta["chat_id"] = str(session_id)  # 对齐 YukiV6 字段名
             if metadata:
                 meta.update(metadata)
             
@@ -199,7 +199,7 @@ class YukiMemory:
             where_filter = {"timestamp": {"$gte": time_threshold}}
             
             if session_id:
-                where_filter["session_id"] = str(session_id)
+                where_filter["chat_id"] = str(session_id)
             
             existing = self._collection.get(where=where_filter)
             if existing and existing.get('documents'):
@@ -242,7 +242,7 @@ class YukiMemory:
         # 构建过滤条件
         where_filter = None
         if session_id:
-            where_filter = {"session_id": {"$in": [str(session_id), "global"]}}
+            where_filter = {"chat_id": {"$in": [str(session_id), "global"]}}
         
         # 1. 语义向量检索
         semantic_results = self._semantic_search(context, limit * 2, where_filter)
@@ -357,7 +357,7 @@ class YukiMemory:
                 id=meta.get("id", ""),
                 content=doc,
                 source=meta.get("source", ""),
-                session_id=meta.get("session_id", ""),
+                session_id=meta.get("chat_id", meta.get("session_id", "")),
                 timestamp=meta.get("timestamp", 0),
                 metadata={"score": score, **meta}
             ))
@@ -382,7 +382,8 @@ class YukiMemory:
             return []
         
         cid_str = str(session_id) if session_id else None
-        filter_cond = {"session_id": {"$in": [cid_str, "manual_record"]}} if cid_str else None
+        # 对齐 YukiV6: 数据库字段名是 chat_id
+        filter_cond = {"chat_id": {"$in": [cid_str, "manual_record"]}} if cid_str else None
         
         # 关键词提取
         raw_keywords = jieba.analyse.extract_tags(query_text, topK=top_k, withWeight=True)

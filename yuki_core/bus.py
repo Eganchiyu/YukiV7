@@ -7,6 +7,7 @@ Yuki 上下文总线
 """
 
 import asyncio
+import time
 import logging
 from typing import Optional, TYPE_CHECKING
 
@@ -51,6 +52,9 @@ class ContextBus:
         # 运行状态
         self._running = False
         self._tasks: list[asyncio.Task] = []
+        
+        # 消息时间追踪（用于日记空闲判断，对齐 V6 last_message_time）
+        self._last_message_time: dict[str, float] = {}
     
     # ================= 插件注册 =================
     
@@ -108,7 +112,7 @@ class ContextBus:
             except Exception as e:
                 logger.error(f"[Bus] 断开 {plugin.name} 失败: {e}")
         
-        await close_session()
+        close_session()
         logger.info("[Bus] 已停止")
     
     # ================= 事件处理 =================
@@ -141,6 +145,9 @@ class ContextBus:
         这是所有平台消息的统一入口
         """
         logger.debug(f"[Bus] 事件: {event.source} | {event.user_name}: {event.content[:50]}...")
+        
+        # 追踪消息到达时间（用于日记空闲判断）
+        self._last_message_time[event.session_id] = time.time()
         
         # 注入身份上下文
         platform_identity = self.identity.get_platform_identity(event.source)
@@ -227,7 +234,14 @@ class ContextBus:
                 logger.error(f"[Bus] 精力衰减异常: {e}")
     
     async def _background_diary_checker(self):
-        """空闲时自动写日记"""
+        """
+        后台任务，每30秒检查一次空闲群聊
+        
+        对齐 V6 idle_diary_checker 逻辑：
+        - 用 last_message_time 追踪消息到达时间（而非历史记录中的时间字符串）
+        - 达到 min_turns 后空闲 idle_seconds 才触发
+        - 达到 max_length 强制触发（V6 main.py:201 逻辑）
+        """
         if not self.config or not self.history or not self.memory:
             return
         
@@ -235,7 +249,7 @@ class ContextBus:
         while self._running:
             await asyncio.sleep(30)
             try:
-                now = __import__("time").time()
+                now = time.time()
                 history_data = self.history.load()
                 
                 for session_id, messages in list(history_data.items()):
@@ -243,27 +257,44 @@ class ContextBus:
                         continue
                     
                     non_system = [m for m in messages if m.get("role") != "system"]
-                    if len(non_system) < cfg.DIARY_MIN_TURNS:
+                    non_system_count = len(non_system)
+                    
+                    # === 强制触发：历史超过 max_length ===
+                    if non_system_count > cfg.DIARY_MAX_LENGTH:
+                        logger.info(f"[Bus] {session_id} 历史过长({non_system_count}>{cfg.DIARY_MAX_LENGTH})，强制写日记")
+                        self.mind._writing_diary.add(session_id)
+                        try:
+                            new_history = await self._do_summarize(session_id, messages)
+                            if new_history is not None:
+                                history_data = self.history.load()
+                                history_data[session_id] = new_history
+                                self.history.save(history_data)
+                        finally:
+                            self.mind._writing_diary.discard(session_id)
                         continue
                     
-                    # 简单判断：最后一条消息的时间
-                    last_msg = non_system[-1]
-                    last_time = last_msg.get("time", "")
-                    if last_time:
-                        try:
-                            # 解析 "2026年05月17日14:30" 格式
-                            dt = datetime.datetime.strptime(last_time, "%Y年%m月%d日%H:%M")
-                            idle_secs = (datetime.datetime.now() - dt).total_seconds()
-                            if idle_secs < cfg.DIARY_IDLE_SECONDS:
-                                continue
-                        except Exception:
-                            continue
+                    # === 空闲触发：轮数不足则跳过 ===
+                    if non_system_count < cfg.DIARY_MIN_TURNS:
+                        continue
                     
-                    # 触发写日记
-                    logger.info(f"[Bus] {session_id} 空闲超时，触发日记")
+                    # 用 last_message_time 判断空闲（对齐 V6）
+                    last_msg_time = self._last_message_time.get(session_id)
+                    if last_msg_time is None:
+                        continue
+                    
+                    idle_seconds = now - last_msg_time
+                    if idle_seconds < cfg.DIARY_IDLE_SECONDS:
+                        continue
+                    
+                    # 满足条件，触发写日记
+                    logger.info(f"[Bus] {session_id} 空闲 {idle_seconds:.0f}s，轮数 {non_system_count}，触发日记")
                     self.mind._writing_diary.add(session_id)
                     try:
-                        await self._do_summarize(session_id, messages)
+                        new_history = await self._do_summarize(session_id, messages)
+                        if new_history is not None:
+                            history_data = self.history.load()
+                            history_data[session_id] = new_history
+                            self.history.save(history_data)
                     finally:
                         self.mind._writing_diary.discard(session_id)
             
@@ -271,7 +302,11 @@ class ContextBus:
                 logger.error(f"[Bus] 日记检查异常: {e}")
     
     async def _do_summarize(self, session_id: str, history: list):
-        """写日记总结"""
+        """
+        写日记总结，返回裁剪后的 history（由调用方负责保存）
+        
+        对齐 V6 do_summarize：只负责生成日记 + 返回裁剪历史，不自己保存
+        """
         from .identity import get_base_setting, get_summary_prompt
         import datetime as dt
         import re
@@ -281,7 +316,7 @@ class ContextBus:
         
         llm_caller = self._make_llm_caller()
         if not llm_caller:
-            return
+            return history  # 无法生成日记，返回原历史
         
         messages = [
             {"role": "system", "content": get_base_setting()},
@@ -296,13 +331,11 @@ class ContextBus:
         if self.memory:
             self.memory.remember(diary, session_id=session_id, source="diary")
         
-        # 裁剪历史
+        # 裁剪历史：保留 system prompt + 最近 N 轮对话
         kept = [m for m in history if m.get("role") == "system"] + dialogue_msgs[-self.config.KEEP_LAST_DIALOGUE:]
-        history_data = self.history.load()
-        history_data[session_id] = kept
-        self.history.save(history_data)
         
-        logger.info(f"[Bus] {session_id} 日记写入完成")
+        logger.info(f"[Bus] {session_id} 日记写入完成，历史 {len(history)} → {len(kept)}")
+        return kept
     
     async def _background_ice_breaker(self):
         """破冰主动唤醒（占位）"""

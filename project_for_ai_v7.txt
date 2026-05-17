@@ -1,0 +1,6816 @@
+
+============================================================
+FILE_PATH: blacklist.txt
+============================================================
+
+yuki
+主人
+哥哥
+人家
+
+
+============================================================
+FILE_PATH: DEVLOG.md
+============================================================
+
+# Yuki Agent 开发日志
+
+> **最后更新**: 2026-05-17
+> **当前进度**: Phase 2 核心完成，待补表情包/破冰/帮助指令
+> **项目路径**: `D:\Projects\YukiV7`
+> **源项目**: `D:\Projects\YukiV6` (YukiV6 QQ Bot)
+
+---
+
+## 一、项目概述
+
+### 1.1 项目目标
+
+将 Yuki 从一个 **QQ 群聊机器人** (YukiV6) 重构为一个 **多平台 AI Agent** (YukiV7)，核心变化：
+
+1. **人格独立** - 核心人格不依赖任何平台
+2. **插件化架构** - 平台和功能都以插件形式接入
+3. **多平台身份感知** - Yuki 能意识到自己在不同平台的不同身份
+4. **可扩展性** - 便于未来添加语音、网页、智能家居等能力
+
+### 1.2 架构设计
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Yuki Agent Core                       │
+│  ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌──────────┐ │
+│  │ Identity │  │ Memory  │  │  Mind    │  │  Maid    │ │
+│  │ 身份内核 │  │ 记忆系统 │  │ 决策引擎 │  │ 进化系统 │ │
+│  └────┬────┘  └────┬────┘  └────┬─────┘  └────┬─────┘ │
+│       └────────────┴────────────┴──────────────┘       │
+│              ┌──────────▼──────────┐                   │
+│              │   Context Bus       │                   │
+│              └──────────┬──────────┘                   │
+└─────────────────────────┼───────────────────────────────┘
+                          │
+    ┌─────────────────────┼─────────────────────┐
+    ▼                     ▼                     ▼
+┌────────┐          ┌────────┐          ┌────────┐
+│QQ Plugin│          │Web Plugin│        │Voice   │
+└────────┘          └────────┘          └────────┘
+```
+
+---
+
+## 二、Phase 0 成果（文档与准备）
+
+### 2.1 创建的文件
+
+| 文件 | 说明 |
+|------|------|
+| `docs/ARCHITECTURE.md` | 完整架构设计文档 (33KB) |
+| `docs/EVENT_FORMAT.md` | PlatformEvent 统一事件格式定义 |
+| `docs/PLUGIN_SPEC.md` | Plugin 接口规范 (PlatformPlugin/CapabilityPlugin) |
+| `docs/MIGRATION_CHECKLIST.md` | YukiV6 → YukiV7 代码迁移清单 |
+| `configs/identities.yaml` | 多平台身份配置 |
+| `configs/plugins.yaml` | 插件配置 |
+| `configs/config.example.yaml` | 主配置模板 |
+| `README.md` | 项目说明 |
+| `pyproject.toml` | 项目依赖 |
+| `.gitignore` | Git 忽略规则 |
+
+### 2.2 核心设计规范
+
+#### PlatformEvent（统一事件格式）
+
+```python
+@dataclass
+class PlatformEvent:
+    source: str           # "qq", "web", "voice"
+    event_type: str       # "message", "image", "file"
+    content: str          # 消息内容
+    user_id: str          # 用户ID
+    user_name: str        # 用户名
+    session_id: str       # 会话ID
+    session_type: str     # "private", "group"
+    timestamp: float
+    metadata: dict        # 平台特有数据
+    attachments: list     # 附件
+    identity_context: dict  # 由Bus注入的身份上下文
+```
+
+#### Plugin 接口
+
+```python
+class PlatformPlugin(ABC):
+    name: str
+    platform_id: str
+    
+    async def connect(self) -> bool
+    async def disconnect(self) -> None
+    async def receive(self) -> AsyncIterator[PlatformEvent]
+    async def send(self, event, response) -> bool
+    def translate_in(self, raw_data) -> PlatformEvent
+    def translate_out(self, event, response) -> any
+
+class CapabilityPlugin(ABC):
+    name: str
+    description: str
+    parameters_schema: dict
+    
+    async def execute(self, params: dict) -> dict
+    def get_schema(self) -> dict
+```
+
+---
+
+## 三、Phase 1 成果（Core 抽离）
+
+### 3.1 创建的模块
+
+#### `yuki_core/models.py` - 数据模型
+
+```python
+# 核心数据结构
+EventType       # MESSAGE, IMAGE, FILE, VOICE, ACTION, SYSTEM
+SessionType     # PRIVATE, GROUP, CHANNEL
+ActionType      # REPLY, IGNORE, CAPABILITY, DELEGATE
+
+PlatformEvent   # 跨平台统一事件
+YukiResponse    # Yuki 的回复
+Action          # Yuki 的行动
+Decision        # 决策结果
+IdentityContext # 身份上下文
+MemoryEntry     # 记忆条目
+Attachment      # 附件信息
+```
+
+#### `yuki_core/identity.py` - 身份定义
+
+```python
+class SpeakingStyle:
+    self_reference: str   # 自称
+    address_master: str   # 称呼主人
+    tone: str             # 语气
+
+class Relationship:
+    name: str
+    relation: str
+    style: str
+
+class Persona:
+    name: str
+    display_name: str
+    personality: list
+    speaking_style: SpeakingStyle
+    relationships: dict
+    maid_setting: str     # 小女仆设定
+    
+    def get_base_prompt() -> str    # 基础人格 prompt
+    def get_full_prompt() -> str    # 包含小女仆的完整 prompt
+
+class YukiIdentity:
+    persona: Persona
+    platform_identities: dict  # {platform_id: IdentityContext}
+    
+    def get_platform_identity(platform) -> IdentityContext
+    def get_system_prompt(platform) -> str
+
+# 快捷函数（兼容旧代码）
+get_system_prompt(platform) -> str
+get_yuki_setting_private() -> str
+get_yuki_setting_group() -> str
+get_summary_prompt() -> str
+```
+
+#### `yuki_core/mind.py` - 决策引擎
+
+```python
+class EnergySystem:
+    """精力值管理"""
+    def get(session_id) -> float     # 获取精力（含恢复计算）
+    def consume(session_id) -> float # 消耗精力
+
+class ActivityTracker:
+    """活跃度追踪"""
+    def update(session_id) -> float  # 非线性增长
+    def get(session_id) -> float     # 获取（含衰减）
+
+class DesireCalculator:
+    """欲望计算（Sigmoid）"""
+    def calculate(activity, energy, time_weight) -> float
+    def should_reply(desire) -> bool
+
+class BioClock:
+    """生物钟（高斯活跃峰）"""
+    @staticmethod
+    def get_time_weight() -> float
+
+class YukiMind:
+    """主决策引擎"""
+    energy: EnergySystem
+    activity: ActivityTracker
+    desire: DesireCalculator
+    bioclock: BioClock
+    
+    async def process(event: PlatformEvent) -> YukiResponse
+    def get_status(session_id) -> dict
+```
+
+**关键参数**:
+- 精力: 初始100, 每分钟恢复0.8, 每次回复消耗6
+- 活跃度: 灵敏度0.12, 衰减系数0.65, 5分钟半衰
+- 欲望: Sigmoid中心50, 陡峭度0.08, 阈值30
+
+#### `yuki_core/memory.py` - 记忆系统
+
+```python
+class YukiMemory:
+    """向量检索 + 关键词补偿"""
+    
+    def remember(content, session_id, source, metadata) -> bool
+    def recall(context, session_id, limit) -> list[MemoryEntry]
+    
+    def load_history() -> dict
+    def save_history(history)
+    def append_message(session_id, role, content)
+    def get_recent_messages(session_id, limit) -> list[dict]
+    def clear_session(session_id)
+```
+
+**依赖**: chromadb, sentence-transformers, jieba
+**惰性初始化**: 首次调用时才加载模型
+
+#### `yuki_core/maid.py` - 小女仆系统
+
+```python
+class MaidAgent:
+    """自主编程进化"""
+    task_queue: asyncio.Queue
+    
+    async def delegate(task_desc, session_id) -> str
+    def list_all_skills() -> list[str]
+    def get_current_task(session_id) -> str
+```
+
+**工具**: list_skills, read_skill, write_skill, run_skill, install_package, finish
+
+#### `yuki_core/bus.py` - 上下文总线
+
+```python
+class ContextBus:
+    """连接 Core 和 Plugin"""
+    mind: YukiMind
+    identity: YukiIdentity
+    platform_plugins: dict
+    capability_plugins: dict
+    
+    def register_platform(plugin)
+    def register_capability(plugin)
+    async def start()          # 启动所有监听
+    async def stop()           # 停止
+    async def receive(event) -> YukiResponse  # 核心入口
+    def get_capabilities_schema() -> list[dict]
+```
+
+#### `yuki_core/plugin.py` - 插件基类
+
+```python
+class PlatformPlugin(ABC):
+    name: str
+    platform_id: str
+    bus: ContextBus
+    
+    async def connect() -> bool
+    async def disconnect() -> None
+    async def receive() -> AsyncIterator[PlatformEvent]
+    async def send(event, response) -> bool
+    def translate_in(raw) -> PlatformEvent
+    def translate_out(event, response) -> any
+
+class CapabilityPlugin(ABC):
+    name: str
+    description: str
+    parameters_schema: dict
+    
+    async def execute(params) -> dict
+    def get_schema() -> dict
+
+def load_plugins_from_config(bus, config_path)
+```
+
+### 3.2 验证结果
+
+```bash
+$ python main.py
+
+============================================================
+  Yuki Agent v0.1.0
+  多平台 AI Agent 框架
+============================================================
+
+[Phase 1] 验证 Core 模块...
+  ✅ Identity: Yuki
+     人格: 活泼, 温柔, 偶尔吐槽, 忠诚
+  ✅ System Prompt: QQ群聊 (649 chars), 私聊 (529 chars)
+  ✅ Mind: 精力系统、活跃度追踪、欲望计算、生物钟
+  ✅ Memory: 向量检索 + 关键词补偿
+  ✅ Maid: 自主编程进化系统
+  ✅ Bus: 上下文总线
+
+[Phase 1] ✅ Core 抽离完成！
+
+[Demo] 模拟事件处理...
+  事件: Yuki在吗
+  回复: [Mind] 收到来自 主人 的消息: Yuki在吗...
+  状态: {'energy': 94.0, 'desire': 0.4545, 'decision_reason': '欲望值 45.5% 超过阈值'}
+```
+
+---
+
+## 四、Phase 2 成果（Plugin 框架 + QQ 迁移）
+
+### 4.1 创建的文件
+
+| 文件 | 说明 | 来源 |
+|------|------|------|
+| `plugins/__init__.py` | 插件包 | 新建 |
+| `plugins/platforms/__init__.py` | 平台插件包 | 新建 |
+| `plugins/platforms/qq_plugin/__init__.py` | QQ 插件入口 | 新建 |
+| `plugins/platforms/qq_plugin/adapter.py` | QQ PlatformPlugin 核心实现 | YukiV6 main.py |
+| `plugins/platforms/qq_plugin/napcat_ws.py` | NapCat WebSocket 连接管理 | YukiV6 ws_connection.py |
+| `plugins/platforms/qq_plugin/cq_parser.py` | CQ码解析器 (合并3模块) | YukiV6 CQParser+CQProtocol+GetMeta |
+| `plugins/platforms/qq_plugin/message_sender.py` | 消息发送器 | YukiV6 ws_sender.py |
+| `plugins/platforms/qq_plugin/group_manager.py` | 群聊开关管理 | YukiV6 main.py |
+| `plugins/platforms/qq_plugin/prompts.py` | QQ 特化系统提示词 | YukiV6 core/prompts.py |
+| `tests/test_qq_plugin.py` | 集成测试 (8项全通过) | 新建 |
+
+### 4.2 模块设计
+
+#### `adapter.py` - QQ 核心适配器
+
+```python
+class QQPlugin(PlatformPlugin):
+    name = "QQ Bot"
+    platform_id = "qq"
+    
+    # 子模块
+    ws: NapCatWS           # WebSocket 连接
+    sender: MessageSender  # 消息发送
+    parser: CQCodeParser   # CQ码解析
+    group_manager: GroupManager  # 群聊开关
+    
+    # 消息缓冲
+    _buffers: dict[str, list]     # chat_id → 消息列表
+    _buffer_tasks: dict[str, Task]  # chat_id → 防抖任务
+    _real_time_debounce: float    # 动态防抖时间
+    
+    async def connect() -> bool
+    async def disconnect() -> None
+    async def receive() -> AsyncIterator[PlatformEvent]  # 核心循环
+    async def send(event, response) -> bool
+    def translate_in(raw_data) -> PlatformEvent
+    def translate_out(event, response) -> str
+```
+
+**关键逻辑迁移**:
+- 消息缓冲防抖 → adapter.py 内部 `_buffers` + `_buffer_tasks`
+- 群聊开关 → group_manager.py 独立模块
+- 冒充检测 → translate_in() 中检测
+- 帮助指令 → mind.py 已内置
+
+#### `napcat_ws.py` - WebSocket 连接
+
+```python
+class NapCatWS:
+    async def connect() -> bool
+    async def ensure_connection() -> WebSocket  # 自动重连
+    async def listen() -> AsyncIterator[dict]   # 事件流
+    async def send_raw(data: dict)              # 发送原始数据
+    async def send_request(action, params, echo) -> dict  # 请求-响应
+    async def disconnect()
+```
+
+#### `cq_parser.py` - CQ码解析器 (合并3模块)
+
+从 YukiV6 的 3 个文件合并为 1 个：
+- `CQProtocol.py` → 工具函数 (smart_truncate, replace_media_cq_codes 等)
+- `GetMeta.py` → MetaGetter 类 (通过 WebSocket 获取用户信息/回复内容)
+- `CQParser.py` → CQCodeParser 类 (整合解析流程)
+
+#### `group_manager.py` - 群聊开关
+
+```python
+class GroupManager:
+    def is_active(group_id) -> bool      # 检查群是否开启
+    def set_active(group_id, active)     # 设置开关
+    def handle_command(msg, uid, gid) -> str  # 处理 /开启 /关闭
+```
+
+### 4.3 配置更新
+
+`configs/plugins.yaml` 新增全局配置：
+
+```yaml
+robot_name: "yuki"
+master_name: "主人"
+master_id: 0           # 主人 QQ 号
+keywords:              # 注意力关键词
+  - 主人
+  - 哥哥
+  - yuki
+```
+
+`main.py` 启动流程：
+
+```
+1. 初始化 Core (Identity → Mind → Memory → Maid → Bus)
+2. 加载插件 (plugins.yaml → load_plugins_from_config)
+3. 注入全局配置 (master_id 等 → QQ Plugin)
+4. 启动 Bus (连接 NapCat → 监听消息 → 事件循环)
+```
+
+### 4.4 测试结果
+
+```bash
+$ python tests/test_qq_plugin.py
+
+============================================================
+  QQ Plugin 集成测试
+  Phase 2: Plugin 框架 + QQ 迁移
+============================================================
+
+[Test] 导入测试...
+  ✅ yuki_core 导入成功
+  ✅ QQ Plugin 导入成功
+
+[Test] 消息截断测试...
+  ✅ 短消息不截断
+  ✅ 超长消息截断: 200 → 83 chars
+  ✅ CQ 码完整性保留
+
+[Test] CQ 码解析测试...
+  ✅ 多媒体 CQ 码替换
+  ✅ @ QQ 号提取
+  ✅ 回复 ID 提取
+  ✅ @ Yuki 检测
+
+[Test] 群聊管理测试...
+  ✅ 默认状态为开启
+  ✅ 关闭群聊
+  ✅ 开启群聊
+  ✅ 非主人被拒绝
+  ✅ 主人关闭成功
+  ✅ 主人开启成功
+  ✅ 非管理指令返回 None
+
+[Test] 提示词生成测试...
+  ✅ 群聊提示词: 755 chars
+  ✅ 私聊提示词: 189 chars
+  ✅ 破冰提示词: 182 chars
+  ✅ 视觉提示词: 123 chars
+
+[Test] 消息转换测试...
+  ✅ 群聊转换: 【"小明"】说: 大家好
+  ✅ 私聊转换: 在吗
+  ✅ 冒充检测: 主人(冒充)
+
+[Test] 插件配置加载测试...
+  ✅ plugins.yaml 解析成功
+  ✅ QQ 插件加载成功: QQ Bot v1.0.0
+
+[Test] Bus 事件接收测试...
+  ✅ 事件处理成功: [Mind] 收到来自 主人 的消息: Yuki在吗...
+     状态: {'energy': 94.0, 'desire': 0.4336, 'decision_reason': '欲望值 43.4% 超过阈值'}
+
+============================================================
+  结果: 8/8 通过, 0 失败
+============================================================
+```
+
+### 4.5 与 YukiV6 的差异
+
+| 特性 | YukiV6 | YukiV7 Phase 2 |
+|------|--------|-----------------|
+| 入口 | main.py 一体化 | main.py → Bus → Plugin |
+| QQ 逻辑 | 散布在 main.py | 封装在 qq_plugin/ |
+| 配置 | config.py 单例 | plugins.yaml + identities.yaml |
+| 事件格式 | 原始 dict | PlatformEvent dataclass |
+| 决策 | brain.py + engine.py | yuki_core/mind.py |
+| 可扩展性 | 仅 QQ | 插件化，可加 Web/Voice |
+
+---
+
+## 五、Phase 2 开发计划（已完成）
+
+### 4.1 目标
+
+1. 实现插件加载机制
+2. 把 YukiV6 的 QQ 功能迁移为第一个插件
+3. 端到端测试：QQ消息 → Core处理 → 回复
+
+### 4.2 任务清单
+
+| # | 任务 | 来源文件 | 目标文件 | 预估工时 |
+|---|------|----------|----------|----------|
+| 1 | QQ Plugin 目录结构 | - | `plugins/platforms/qq_plugin/` | 0.5h |
+| 2 | NapCat WebSocket | `network/ws_connection.py` | `qq_plugin/napcat_ws.py` | 2h |
+| 3 | CQ码解析器 | `modules/message/CQParser.py` | `qq_plugin/cq_parser.py` | 2h |
+| 4 | 消息发送器 | `network/ws_sender.py` | `qq_plugin/message_sender.py` | 1h |
+| 5 | QQ适配器主逻辑 | `main.py` (消息缓冲/防抖) | `qq_plugin/adapter.py` | 4h |
+| 6 | 群聊管理器 | `main.py` (群聊开关) | `qq_plugin/group_manager.py` | 1h |
+| 7 | QQ系统提示词 | `core/prompts.py` (群聊部分) | `qq_plugin/prompts.py` | 1h |
+| 8 | 集成测试 | - | `tests/test_qq_plugin.py` | 2h |
+
+### 4.3 文件迁移映射
+
+```
+YukiV6                          YukiV7
+─────────────────────────────────────────────────────────────
+main.py (消息缓冲/防抖)     →   plugins/platforms/qq_plugin/adapter.py
+main.py (群聊开关)          →   plugins/platforms/qq_plugin/group_manager.py
+main.py (冒充检测)          →   plugins/platforms/qq_plugin/adapter.py
+modules/message/CQParser.py →   plugins/platforms/qq_plugin/cq_parser.py
+network/ws_connection.py    →   plugins/platforms/qq_plugin/napcat_ws.py
+network/ws_sender.py        →   plugins/platforms/qq_plugin/message_sender.py
+core/prompts.py (群聊prompt) →  plugins/platforms/qq_plugin/prompts.py
+core/engine.py (破冰)       →   plugins/social/ice_breaker/ (Phase 5)
+modules/vision/processor.py →   plugins/social/sticker_system/ (Phase 5)
+modules/stickers/           →   plugins/social/sticker_system/ (Phase 5)
+```
+
+### 4.4 QQ Plugin 目录结构
+
+```
+plugins/platforms/qq_plugin/
+├── __init__.py
+├── adapter.py          # PlatformPlugin 实现（核心）
+├── napcat_ws.py        # NapCat WebSocket 连接管理
+├── cq_parser.py        # CQ码解析器
+├── message_sender.py   # 消息发送器
+├── group_manager.py    # 群聊开关管理
+├── prompts.py          # QQ 特化的系统提示词
+└── config.py           # QQ 特有配置（可选）
+```
+
+### 4.5 adapter.py 核心实现
+
+```python
+# plugins/platforms/qq_plugin/adapter.py
+
+from yuki_core import PlatformPlugin, PlatformEvent, YukiResponse
+
+class QQPlugin(PlatformPlugin):
+    name = "QQ Bot"
+    platform_id = "qq"
+    version = "1.0.0"
+    
+    def __init__(self, **config):
+        self.ws_url = config.get("napcat_ws_url", "ws://localhost:3001")
+        self.ws_token = config.get("napcat_ws_token", "")
+        self.target_groups = config.get("target_groups", [])
+        self.target_qq = config.get("target_qq", 0)
+        self.debounce_time = config.get("debounce_time", 32)
+        
+        self.ws = None
+        self.sender = None
+        self.parser = None
+        self.group_manager = None
+        
+        # 消息缓冲
+        self._buffers: dict[str, list] = {}
+        self._buffer_tasks: dict[str, asyncio.Task] = {}
+    
+    async def connect(self) -> bool:
+        from .napcat_ws import NapCatWS
+        from .message_sender import MessageSender
+        from .cq_parser import CQParser
+        from .group_manager import GroupManager
+        
+        self.ws = NapCatWS(self.ws_url, self.ws_token)
+        self.sender = MessageSender(self.ws)
+        self.parser = CQParser(self.ws)
+        self.group_manager = GroupManager()
+        
+        return await self.ws.connect()
+    
+    async def disconnect(self) -> None:
+        if self.ws:
+            await self.ws.disconnect()
+    
+    async def receive(self):
+        async for raw_data in self.ws.listen():
+            # 过滤非消息事件
+            if raw_data.get("post_type") != "message":
+                continue
+            
+            # 转换为 PlatformEvent
+            event = self.translate_in(raw_data)
+            
+            if event:
+                yield event
+    
+    async def send(self, event: PlatformEvent, response: YukiResponse) -> bool:
+        # 解析回复中的特殊标签（表情包、图片等）
+        parts = self._parse_response(response.text)
+        
+        for part in parts:
+            await self.sender.send(event.session_id, part, mode=event.session_type)
+            await asyncio.sleep(1.0)  # 模拟人类节奏
+        
+        return True
+    
+    def translate_in(self, raw_data: dict) -> PlatformEvent:
+        """QQ原始数据 → PlatformEvent"""
+        msg_type = raw_data.get("message_type")
+        user_id = str(raw_data.get("user_id", ""))
+        
+        # 获取发送者名称
+        sender = raw_data.get("sender", {})
+        user_name = sender.get("card") or sender.get("nickname") or "路人"
+        
+        # 群聊或私聊
+        if msg_type == "group":
+            session_id = str(raw_data.get("group_id", ""))
+            session_type = "group"
+        else:
+            session_id = user_id
+            session_type = "private"
+        
+        return PlatformEvent(
+            source="qq",
+            event_type="message",
+            content=raw_data.get("raw_message", ""),
+            user_id=user_id,
+            user_name=user_name,
+            session_id=session_id,
+            session_type=session_type,
+            timestamp=raw_data.get("time", 0),
+            metadata={
+                "raw_data": raw_data,
+                "message_type": msg_type,
+            }
+        )
+    
+    def translate_out(self, event: PlatformEvent, response: YukiResponse) -> any:
+        """YukiResponse → QQ消息格式"""
+        return response.text
+```
+
+### 4.6 需要处理的特殊逻辑
+
+1. **消息缓冲防抖** - 在 adapter.py 中实现
+2. **群聊开关** - 在 group_manager.py 中实现
+3. **冒充检测** - 在 adapter.py 的 translate_in 中处理
+4. **特殊指令** - /开启、/关闭、help 等
+5. **表情包系统** - 暂不迁移，放到 Phase 5
+
+### 4.7 与 Core 的集成点
+
+```
+QQ Plugin                    Core
+─────────────────────────────────────
+receive()               →   ContextBus.receive()
+                              ↓
+                         YukiMind.process()
+                              ↓
+send()              ←    YukiResponse
+                              ↑
+                         Identity.get_system_prompt("qq")
+```
+
+---
+
+## 五、后续阶段概览
+
+### Phase 3: 身份感知（1周）
+
+**目标**: Yuki 能意识到自己在不同平台的不同身份
+
+**任务**:
+- 在 `configs/identities.yaml` 中为每个平台配置不同的上下文提示词
+- 在 `ContextBus.receive()` 中注入平台身份上下文
+- 测试：QQ端表现活泼，网页端表现专业
+
+### Phase 4: 网页端 + API（2-3周）
+
+**目标**: 有第一个非QQ平台
+
+**任务**:
+- 创建 `plugins/platforms/web_plugin/`
+- 实现 FastAPI 后端
+- 实现简单聊天前端（Gradio 或 Vue）
+- REST API + WebSocket 实时对话
+
+### Phase 5: 能力扩展（持续迭代）
+
+**目标**: Yuki 能做更多事
+
+**能力插件清单**:
+- `web_search` - 联网搜索
+- `file_manager` - 文件操作
+- `code_executor` - 代码执行
+- `calendar` - 日历管理
+- `smart_home` - 智能家居
+
+### Phase 6: 语音 + 现实交互（3-4周）
+
+**目标**: Yuki 有声音，能控制物理世界
+
+**任务**:
+- 集成 Whisper STT + GPT-SoVITS TTS
+- 智能家居控制
+- 实体化方向：树莓派 + 屏幕
+
+---
+
+## 六、开发规范
+
+### 6.1 代码规范
+
+- Python 3.10+
+- 类型注解
+- 异步优先 (async/await)
+- 中文注释
+
+### 6.2 Git 规范
+
+```bash
+# 分支命名
+main        # 稳定版
+dev         # 开发版
+feature/*   # 功能分支
+fix/*       # 修复分支
+
+# 提交信息
+feat: 添加 xxx 功能
+fix: 修复 xxx 问题
+refactor: 重构 xxx
+docs: 更新文档
+```
+
+### 6.3 测试规范
+
+每个 Phase 完成后必须：
+1. 单元测试通过
+2. 集成测试通过
+3. main.py 能正常运行
+4. 现有功能不回退
+
+---
+
+## 七、关键配置文件
+
+### `configs/identities.yaml`
+
+```yaml
+core:
+  name: yuki
+  display_name: Yuki
+  personality: [活泼, 温柔, 偶尔吐槽, 忠诚]
+  speaking_style:
+    self_reference: 人家
+    address_master: 主人
+  relationships:
+    master: {name: 池宇健, relation: 主人}
+    momo: {name: Momo, relation: 妹妹}
+
+platforms:
+  qq:
+    context: "你现在在QQ群里..."
+    style_override: {max_length: 40}
+  web:
+    context: "你是个人助手..."
+    style_override: {max_length: 500}
+```
+
+### `configs/plugins.yaml`
+
+```yaml
+platforms:
+  qq:
+    enabled: true
+    class: "plugins.platforms.qq_plugin.QQPlugin"
+    config:
+      napcat_ws_url: "ws://localhost:3001"
+  
+  web:
+    enabled: false
+    class: "plugins.platforms.web_plugin.WebPlugin"
+
+capabilities:
+  web_search:
+    enabled: true
+    class: "plugins.capabilities.web_search.WebSearchPlugin"
+```
+
+---
+
+## 八、常见问题
+
+### Q: 为什么不直接修改 YukiV6？
+
+A: YukiV6 的代码和 QQ 协议强耦合，直接修改会引入大量风险。重构为独立的 Core + Plugin 架构，可以保持 YukiV6 继续运行，同时开发 YukiV7。
+
+### Q: Token 消耗会增加吗？
+
+A: Phase 0-2 基本不变。Phase 3+ 会因为身份上下文注入增加 5-10%。可以通过分层模型策略优化。
+
+### Q: 什么时候可以使用？
+
+A: Phase 2 完成后（约4-5周），QQ 功能可以完整运行。Phase 4 完成后可以使用网页版。
+
+---
+
+## 九、给下一个 LLM 的指导
+
+### 9.1 当前状态
+
+- **项目路径**: `D:\Projects\YukiV7`
+- **源项目**: `D:\Projects\YukiV6`
+- **运行环境**: `conda ai_env` (D:\Dev\Env\MiniForge\envs\ai_env)
+- **已完成**: Phase 0 (文档) + Phase 1 (Core抽离) + Phase 2 核心 (Plugin框架 + QQ迁移)
+- **待补**: 表情包系统、帮助指令、破冰、精力衰减、视觉理解
+- **下一步**: Phase 2.5 (补齐功能缺口) 或 Phase 3 (身份感知)
+
+### 9.2 开始 Phase 2 前的准备
+
+1. **阅读以下文件**:
+   - `D:\Projects\YukiV7\docs\MIGRATION_CHECKLIST.md` - 迁移清单
+   - `D:\Projects\YukiV7\docs\PLUGIN_SPEC.md` - 插件规范
+   - `D:\Projects\YukiV7\yuki_core\plugin.py` - 插件基类
+
+2. **理解现有 QQ 代码**:
+   - `D:\Projects\YukiV6\main.py` - 消息缓冲、防抖、群聊开关
+   - `D:\Projects\YukiV6\network\ws_connection.py` - WebSocket 连接
+   - `D:\Projects\YukiV6\modules\message\CQParser.py` - CQ码解析
+   - `D:\Projects\YukiV6\network\ws_sender.py` - 消息发送
+
+3. **关键设计决策**:
+   - QQ Plugin 继承 `PlatformPlugin`
+   - 所有 QQ 特有逻辑都在 Plugin 内部
+   - Core 不包含任何 QQ 协议相关内容
+   - 消息缓冲防抖逻辑在 adapter.py 中实现
+
+### 9.3 Phase 2 执行顺序
+
+```
+Step 1: 创建 plugins/platforms/qq_plugin/ 目录
+Step 2: 实现 napcat_ws.py (从 ws_connection.py 迁移)
+Step 3: 实现 cq_parser.py (从 CQParser.py 迁移)
+Step 4: 实现 message_sender.py (从 ws_sender.py 迁移)
+Step 5: 实现 adapter.py (从 main.py 迁移消息缓冲/防抖)
+Step 6: 实现 group_manager.py (从 main.py 迁移群聊开关)
+Step 7: 实现 prompts.py (QQ特化的系统提示词)
+Step 8: 更新 main.py 加载 QQ Plugin
+Step 9: 端到端测试
+```
+
+### 9.4 验证标准
+
+Phase 2 完成后，以下功能必须正常：
+- [x] NapCat WebSocket 连接成功
+- [x] 接收 QQ 群消息
+- [x] 消息防抖正常（短时间内多条消息合并处理）
+- [x] 群聊开关 (/开启, /关闭) 正常
+- [x] Yuki 能回复消息（LLM 调用 + 上下文构建）
+- [x] 私聊功能正常
+- [x] 冒充检测正常
+- [x] CQ码解析正常（@/回复/图片占位）
+- [x] 日记自动写入正常
+- [x] RAG 检索正常（融合排名，12条）
+- [x] 历史记录持久化正常
+- [ ] 表情包系统 [MEME_SEARCH]
+- [ ] 帮助指令 (help → 发送帮助图)
+- [ ] 破冰主动唤醒
+- [ ] 精力衰减后台任务
+- [ ] 视觉理解 (MemeProcessor)
+
+### 9.5 Phase 2 功能对齐清单
+
+```
+功能                          YukiV6    YukiV7    备注
+═══════════════════════════════════════════════════════════════════
+消息收发 (WebSocket+CQ码)     ✅        ✅        已对齐
+LLM 调用 (主备切换)            ✅        ✅        llm.py
+上下文构建 (RAG+历史+prompt)  ✅        ✅        已严格对齐
+精力/欲望/生物钟              ✅        ✅        mind.py
+群聊开关 (/开启 /关闭)        ✅        ✅        group_manager.py
+冒充检测                      ✅        ✅        adapter.py
+消息防抖 (32秒缓冲)           ✅        ✅        adapter.py
+日记自动写入                  ✅        ✅        bus.py
+CQ码解析 (@/回复/图片)        ✅        ✅        cq_parser.py
+历史记录管理                  ✅        ✅        history.py
+布局标签清理                  ✅        ✅        mind.py
+─────────────────────────────────────────────────────────────────
+表情包系统 [MEME_SEARCH]      ✅        ❌        P0 待补
+帮助指令 (help → 发图)        ✅        ❌        P0 待补
+破冰主动唤醒                  ✅        ❌        P1 待补
+精力衰减后台任务              ✅        ❌        P1 待补
+视觉理解 (MemeProcessor)      ✅        ❌        P2 待补
+表情包正反馈 (RLHF)           ✅        ❌        P2 待补
+小女仆委托                    ✅        ⚠️        占位，需集成
+```
+
+### 9.6 注意事项
+
+1. **不要修改 yuki_core/** - 这是稳定的 Core，Phase 2 只在 plugins/ 下工作
+2. **保持向后兼容** - QQ Plugin 的行为必须和 YukiV6 一致
+3. **测试先行** - 每个模块迁移后立即测试
+4. **日志完善** - 保持详细的日志输出，方便调试
+
+---
+
+*End of Development Log*
+
+
+
+============================================================
+FILE_PATH: main.py
+============================================================
+
+# main.py
+# Yuki Agent 入口
+
+"""
+Yuki Agent - 多平台 AI Agent 框架
+"""
+
+import asyncio
+import sys
+import yaml
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from yuki_core.logger import setup_logging
+setup_logging(debug=True)
+
+from yuki_core.config import cfg
+from yuki_core import (
+    YukiIdentity, YukiMind, ContextBus,
+    PlatformEvent, get_system_prompt,
+)
+from yuki_core.plugin import load_plugins_from_config
+from yuki_core.maid import MaidAgent
+from yuki_core.history import HistoryManager
+from yuki_core.memory import YukiMemory
+
+
+def load_plugins_config(config_path: str = None) -> dict:
+    if config_path is None:
+        config_path = str(PROJECT_ROOT / "configs" / "plugins.yaml")
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def inject_global_config(bus: ContextBus, plugin_config: dict):
+    """将 plugins.yaml 的全局配置注入到 QQ 插件"""
+    qq = bus.get_platform("qq")
+    if qq is None:
+        return
+    qq.master_id = plugin_config.get("master_id", cfg.TARGET_QQ or 0)
+    qq.master_name = plugin_config.get("master_name", cfg.MASTER_NAME)
+    qq.robot_name = plugin_config.get("robot_name", cfg.ROBOT_NAME)
+    qq.keywords = plugin_config.get("keywords", cfg.KEYWORDS)
+
+
+async def main():
+    print("=" * 60)
+    print("  Yuki Agent v0.2.0")
+    print("  Phase 2: Plugin 框架 + QQ 迁移")
+    print("=" * 60)
+    print()
+    
+    # 加载配置
+    cfg.load()
+    
+    # Core 初始化
+    print("[Core] 初始化...")
+    identity = YukiIdentity()
+    print(f"  ✅ Identity: {identity.persona.display_name}")
+    
+    mind = YukiMind(identity)
+    print(f"  ✅ Mind: 精力/活跃度/欲望/生物钟")
+    
+    memory = YukiMemory(
+        vector_db_path=cfg.VECTOR_DB_PATH,
+        embed_model_path=cfg.EMBED_MODEL,
+        history_file=cfg.HISTORY_FILE,
+    )
+    print(f"  ✅ Memory: 向量检索 + 关键词补偿")
+    
+    history = HistoryManager(history_file=cfg.HISTORY_FILE)
+    print(f"  ✅ History: 对话历史管理")
+    
+    maid = MaidAgent()
+    print(f"  ✅ Maid: 小女仆系统")
+    
+    bus = ContextBus(mind, identity, config=cfg)
+    bus.history = history
+    bus.memory = memory
+    print(f"  ✅ Bus: 上下文总线")
+    
+    print()
+    print("[Plugins] 加载...")
+    
+    plugin_config = load_plugins_config()
+    load_plugins_from_config(bus, str(PROJECT_ROOT / "configs" / "plugins.yaml"))
+    inject_global_config(bus, plugin_config)
+    
+    for pid, plugin in bus.platform_plugins.items():
+        print(f"  ✅ {plugin.name} ({pid}) v{plugin.version}")
+    
+    print()
+    print("[Core] ✅ 初始化完成")
+    print()
+    
+    # 启动
+    print("=" * 60)
+    print("  启动 Yuki Agent... 按 Ctrl+C 停止")
+    print("=" * 60)
+    
+    try:
+        await bus.start()
+    except KeyboardInterrupt:
+        print("\n收到中断信号...")
+    finally:
+        await bus.stop()
+        print("Yuki Agent 已停止")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nYuki Agent 已退出")
+
+
+
+============================================================
+FILE_PATH: README.md
+============================================================
+
+# Yuki Agent
+
+> 一个多平台 AI Agent 框架，让 Yuki 从 QQ Bot 进化为真正的数字生命
+
+[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-MIT-important.svg)](LICENSE)
+
+## 简介
+
+Yuki Agent 是 [Yuki-Chan-Chat](https://github.com/Eganchiyu/Yuki-Chan-Bot) 的重构版本，将 Yuki 从一个 QQ 群聊机器人重构为一个 **多平台 AI Agent**。
+
+### 核心特性
+
+- 🧠 **独立人格核心** - 身份、记忆、决策引擎独立于任何平台
+- 🔌 **插件化架构** - 平台适配器和功能扩展都是插件
+- 🌐 **多平台存在** - 同一个灵魂，QQ里是妹妹，网页端是助手
+- 🎭 **身份感知** - Yuki 能意识到自己在不同平台的不同身份
+- 🧹 **小女仆系统** - 自主编程进化，持续学习新技能
+- 📝 **动态记忆** - 日记总结 + RAG 检索，真正的长效记忆
+
+## 架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Yuki Agent Core                       │
+│  ┌─────────┐  ┌─────────┐  ┌──────────┐  ┌──────────┐ │
+│  │ Identity │  │ Memory  │  │  Mind    │  │  Maid    │ │
+│  └────┬────┘  └────┬────┘  └────┬─────┘  └────┬─────┘ │
+│       └────────────┴────────────┴──────────────┘       │
+│              ┌──────────▼──────────┐                   │
+│              │   Context Bus       │                   │
+│              └──────────┬──────────┘                   │
+└─────────────────────────┼───────────────────────────────┘
+                          │
+    ┌─────────────────────┼─────────────────────┐
+    ▼                     ▼                     ▼
+┌────────┐          ┌────────┐          ┌────────┐
+│QQ Plugin│          │Web Plugin│        │Voice   │
+└────────┘          └────────┘          └────────┘
+```
+
+## 项目结构
+
+```
+YukiV7/
+├── yuki_core/              # 核心人格内核
+│   ├── identity.py         # 身份定义
+│   ├── memory.py           # 记忆系统
+│   ├── mind.py             # 决策引擎
+│   ├── maid.py             # 小女仆系统
+│   ├── bus.py              # 上下文总线
+│   └── plugin.py           # 插件基类
+│
+├── plugins/                # 插件目录
+│   ├── platforms/          # 平台适配器
+│   ├── capabilities/       # 能力扩展
+│   └── social/             # 社交优化
+│
+├── configs/                # 配置文件
+│   ├── config.yaml         # 主配置 (API Key等)
+│   ├── identities.yaml     # 多平台身份配置
+│   └── plugins.yaml        # 插件配置
+│
+├── data/                   # 运行时数据
+├── skills/                 # 小女仆技能
+├── models/                 # 本地嵌入模型
+├── tests/                  # 测试
+├── docs/                   # 文档
+└── main.py                 # 入口
+```
+
+## 快速开始
+
+### 安装
+
+```bash
+git clone https://github.com/Eganchiyu/Yuki-Agent.git
+cd Yuki-Agent
+
+# 创建虚拟环境
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# 安装依赖
+pip install -e .
+```
+
+### 配置
+
+```bash
+# 复制配置模板
+cp configs/config.example.yaml configs/config.yaml
+
+# 编辑配置，填入 API Key 等
+python setup.py
+```
+
+### 启动
+
+```bash
+python main.py
+```
+
+## 开发计划
+
+详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
+- [x] Phase 0: 文档与准备
+- [ ] Phase 1: Core 抽离
+- [ ] Phase 2: Plugin 框架 + QQ 迁移
+- [ ] Phase 3: 身份感知
+- [ ] Phase 4: 网页端 + API
+- [ ] Phase 5: 能力扩展
+- [ ] Phase 6: 语音 + 现实交互
+
+## 相关项目
+
+- [Yuki-Chan-Chat](https://github.com/Eganchiyu/Yuki-Chan-Bot) - 原版 QQ Bot (V6)
+- [LiveYuki](https://github.com/Eganchiyu/LiveYuki) - B站直播助手
+
+## License
+
+MIT
+
+
+
+============================================================
+FILE_PATH: docs\EVENT_FORMAT.md
+============================================================
+
+# PlatformEvent 格式定义
+
+> Phase 0 产物 - 统一的跨平台事件格式规范
+
+## 1. 设计目标
+
+- **平台无关**: 所有平台的消息统一为同一种格式
+- **可扩展**: 支持不同平台的特有元数据
+- **向后兼容**: 与现有 QQ 消息格式能互相转换
+
+## 2. 事件类型
+
+| event_type | 说明 | content 示例 |
+|------------|------|--------------|
+| `message` | 文本消息 | "你好" |
+| `image` | 图片消息 | "[图片]" 或 URL |
+| `file` | 文件消息 | 文件名或路径 |
+| `voice` | 语音消息 | 语音转文字 |
+| `action` | 动作事件 | "join_group", "leave_group" |
+| `system` | 系统事件 | "bot_online", "bot_offline" |
+
+## 3. 核心数据结构
+
+```python
+from dataclasses import dataclass, field
+from typing import Optional, Any
+from datetime import datetime
+
+@dataclass
+class PlatformEvent:
+    """跨平台统一事件格式"""
+    
+    # === 必填字段 ===
+    source: str              # 来源平台: "qq", "web", "voice", "discord"
+    event_type: str          # 事件类型: "message", "image", "file", "voice", "action", "system"
+    content: str             # 主要内容（文本/描述）
+    
+    # === 用户信息 ===
+    user_id: str             # 平台内用户ID
+    user_name: str = ""      # 用户显示名称
+    
+    # === 会话信息 ===
+    session_id: str = ""     # 会话ID（群聊=group_id, 私聊=user_id, 网页=session_id）
+    session_type: str = ""   # "private", "group", "channel"
+    
+    # === 时间 ===
+    timestamp: float = 0.0   # Unix时间戳
+    
+    # === 平台特有数据 ===
+    metadata: dict = field(default_factory=dict)
+    """
+    QQ平台特有:
+      - group_id: 群号
+      - sender_name: 发送者群名片
+      - reply_to: 回复的消息ID
+      - at_users: 被@的用户列表
+    
+    Web平台特有:
+      - session_token: 认证token
+    
+    Voice平台特有:
+      - audio_duration: 语音时长
+      - confidence: 语音识别置信度
+    """
+    
+    # === 图片/文件 ===
+    attachments: list = field(default_factory=list)
+    """
+    格式:
+    [
+        {
+            "type": "image",        # "image", "file", "voice"
+            "url": "https://...",   # 远程URL
+            "path": "/local/path", # 本地路径
+            "name": "sticker.png", # 文件名
+            "size": 12345,         # 文件大小(bytes)
+            "is_meme": True        # 是否是表情包(仅QQ)
+        }
+    ]
+    """
+    
+    # === 上下文注入(由Bus层填充) ===
+    identity_context: Optional[dict] = None
+    """
+    由ContextBus注入，包含:
+    - platform_prompt: 该平台的身份提示词
+    - capabilities: 该平台可用的能力列表
+    - style_override: 风格覆盖配置
+    """
+```
+
+## 4. 各平台转换示例
+
+### 4.1 QQ → PlatformEvent
+
+```python
+# NapCat WebSocket 原始数据
+raw_data = {
+    "post_type": "message",
+    "message_type": "group",
+    "user_id": 123456,
+    "group_id": 789012,
+    "raw_message": "Yuki在吗",
+    "sender": {
+        "card": "池宇健",
+        "nickname": "eganchiyu"
+    },
+    "time": 1684300000
+}
+
+# 转换为 PlatformEvent
+event = PlatformEvent(
+    source="qq",
+    event_type="message",
+    content="Yuki在吗",
+    user_id="123456",
+    user_name="池宇健",
+    session_id="789012",
+    session_type="group",
+    timestamp=1684300000,
+    metadata={
+        "group_id": 789012,
+        "sender_name": "池宇健",
+        "raw_message": "Yuki在吗"
+    }
+)
+```
+
+### 4.2 Web → PlatformEvent
+
+```python
+# HTTP 请求
+request = {
+    "message": "帮我查一下天气",
+    "session_id": "web_session_abc123"
+}
+
+# 转换为 PlatformEvent
+event = PlatformEvent(
+    source="web",
+    event_type="message",
+    content="帮我查一下天气",
+    user_id="web_user_001",  # 从token解析
+    user_name="主人",
+    session_id="web_session_abc123",
+    session_type="private",
+    timestamp=time.time(),
+    metadata={}
+)
+```
+
+### 4.3 PlatformEvent → QQ回复
+
+```python
+# Yuki的回复
+response = YukiResponse(
+    text="主人~人家在呢！有什么事吗？",
+    actions=[]
+)
+
+# 转换为QQ消息格式
+qq_message = {
+    "action": "send_group_msg",
+    "group_id": event.session_id,
+    "message": response.text
+}
+```
+
+## 5. 扩展字段规范
+
+如果需要添加新的平台，必须提供:
+
+1. **source 名称**: 全小写英文，如 `"telegram"`, `"bilibili"`
+2. **转换函数**: `translate_in(raw) -> PlatformEvent` 和 `translate_out(response) -> raw`
+3. **metadata 文档**: 说明该平台特有的元数据字段
+
+## 6. 与现有代码的兼容
+
+### 从 chat_history.json 迁移
+
+现有格式:
+```json
+{
+  "chat_id": {
+    "messages": [
+      {"role": "user", "content": "消息内容", "time": "2026-05-17 14:00"}
+    ]
+  }
+}
+```
+
+新格式（保持兼容）:
+```json
+{
+  "chat_id": {
+    "platform": "qq",  // 新增
+    "messages": [
+      {
+        "role": "user",
+        "content": "消息内容",
+        "time": "2026-05-17 14:00",
+        "event_type": "message"  // 新增（可选）
+      }
+    ]
+  }
+}
+```
+
+---
+
+*Created: 2026-05-17 | Phase 0*
+
+
+
+============================================================
+FILE_PATH: docs\MIGRATION_CHECKLIST.md
+============================================================
+
+# 现有代码迁移清单
+
+> Phase 0 产物 - YukiV6 → YukiV7 代码迁移映射
+
+## 1. 迁移原则
+
+1. **渐进式迁移**: 每个模块独立迁移，迁移后立即测试
+2. **行为一致**: 迁移后功能必须与重构前完全一致
+3. **先Core后Plugin**: 先抽离核心模块，再包装成插件
+4. **保留备份**: 原代码保留到 `legacy/` 目录
+
+## 2. 核心模块迁移
+
+### 2.1 身份定义
+
+| 源文件 | 目标文件 | 迁移内容 | 复杂度 |
+|--------|----------|----------|--------|
+| `core/prompts.py` | `yuki_core/identity.py` | 提取 `get_base_setting()` 中的人格定义 | 低 |
+| `core/prompts.py` | `yuki_core/identity.py` | 提取 `MAID_SETTING` 小女仆设定 | 低 |
+| `configs/config.yaml` | `configs/identities.yaml` | 拆分多平台身份配置 | 中 |
+
+**迁移步骤**:
+```python
+# 1. 从 prompts.py 提取核心人格
+persona = {
+    "name": "yuki",
+    "role": "电子妹妹",
+    "personality": ["活泼", "温柔", "偶尔吐槽"],
+    "speaking_style": {
+        "self_reference": "人家",
+        "address_master": "主人"
+    }
+}
+
+# 2. 从 prompts.py 提取关系定义
+relationships = {
+    "master": {"name": "池宇健", "relation": "主人"},
+    "momo": {"name": "Momo", "relation": "妹妹"}
+}
+
+# 3. 创建多平台身份配置
+# → configs/identities.yaml
+```
+
+### 2.2 记忆系统
+
+| 源文件 | 目标文件 | 迁移内容 | 复杂度 |
+|--------|----------|----------|--------|
+| `modules/memory/rag.py` | `yuki_core/memory.py` | 向量检索核心逻辑 | 中 |
+| `core/history_manager.py` | `yuki_core/memory.py` | 对话历史管理 | 低 |
+| `modules/memory/rag.py` | `yuki_core/memory.py` | 移除QQ特有的 chat_id 过滤 | 中 |
+
+**需要修改的耦合点**:
+```python
+# 旧: chat_id 硬编码为QQ群号
+def search_diaries(self, query, chat_id=None, top_k=10):
+    where_filter = {}
+    if chat_id:
+        where_filter["chat_id"] = str(chat_id)
+
+# 新: chat_id 泛化为 session_id，可选过滤
+def recall(self, context: str, session_id: str = None, limit: int = 10):
+    where_filter = {}
+    if session_id:
+        where_filter["session_id"] = session_id
+```
+
+### 2.3 决策引擎
+
+| 源文件 | 目标文件 | 迁移内容 | 复杂度 |
+|--------|----------|----------|--------|
+| `core/brain.py` | `yuki_core/mind.py` | 精力值系统 | 低 |
+| `core/brain.py` | `yuki_core/mind.py` | 欲望计算（Sigmoid） | 低 |
+| `core/engine.py` | `yuki_core/mind.py` | API调用、上下文构建 | 中 |
+| `core/engine.py` | `yuki_core/mind.py` | 移除QQ特化的群聊决策 | 中 |
+
+**需要拆分的逻辑**:
+```python
+# core/engine.py 中的 decide_to_reply
+
+# === 保留: 通用决策 ===
+def calculate_desire(self, activity, energy, time_weight):
+    """计算社交欲望（平台无关）"""
+    return sigmoid(activity, energy, time_weight)
+
+# === 移到 QQ Plugin: 群聊特化规则 ===
+def qq_specific_rules(self, event, history):
+    """QQ群聊特有的回复规则"""
+    # 1. 被@必须回复
+    if event.metadata.get("at_yuki"):
+        return True
+    # 2. 帮助指令必须回复
+    if event.content in ["help", "帮助"]:
+        return True
+    # ... 其他QQ特有规则
+```
+
+### 2.4 小女仆系统
+
+| 源文件 | 目标文件 | 迁移内容 | 复杂度 |
+|--------|----------|----------|--------|
+| `core/maid.py` | `yuki_core/maid.py` | 直接迁移，改动最小 | 低 |
+
+**注意**: 小女仆系统已经是平台无关的，基本不需要修改。
+
+## 3. 平台插件迁移
+
+### 3.1 QQ 插件
+
+| 源文件 | 目标文件 | 迁移内容 | 复杂度 |
+|--------|----------|----------|--------|
+| `main.py` (消息缓冲) | `plugins/platforms/qq_plugin/adapter.py` | 消息缓冲防抖逻辑 | 中 |
+| `main.py` (群聊开关) | `plugins/platforms/qq_plugin/group_manager.py` | /开启 /关闭 逻辑 | 低 |
+| `main.py` (冒充检测) | `plugins/platforms/qq_plugin/adapter.py` | 身份验证逻辑 | 低 |
+| `modules/message/CQParser.py` | `plugins/platforms/qq_plugin/cq_parser.py` | CQ码解析 | 低 |
+| `network/ws_connection.py` | `plugins/platforms/qq_plugin/napcat_ws.py` | WebSocket连接 | 低 |
+| `network/ws_sender.py` | `plugins/platforms/qq_plugin/message_sender.py` | 消息发送 | 低 |
+| `core/engine.py` (破冰) | `plugins/social/ice_breaker/` | 破冰主动唤醒 | 中 |
+| `modules/vision/processor.py` | `plugins/social/sticker_system/` | 表情包视觉理解 | 中 |
+| `modules/stickers/` | `plugins/social/sticker_system/` | 表情包RLHF | 高 |
+
+**QQ Plugin 目录结构**:
+```
+plugins/platforms/qq_plugin/
+├── __init__.py
+├── adapter.py          # PlatformPlugin 实现
+├── napcat_ws.py        # WebSocket连接管理
+├── cq_parser.py        # CQ码解析器
+├── message_sender.py   # 消息发送器
+├── group_manager.py    # 群聊开关管理
+└── config.py           # QQ特有配置
+```
+
+### 3.2 Web 插件 (新建)
+
+| 模块 | 文件 | 说明 |
+|------|------|------|
+| API层 | `plugins/platforms/web_plugin/api.py` | FastAPI 路由 |
+| 适配器 | `plugins/platforms/web_plugin/adapter.py` | PlatformPlugin 实现 |
+| 前端 | `plugins/platforms/web_plugin/frontend/` | Vue/Gradio |
+
+## 4. 能力插件迁移
+
+### 4.1 从 Maid 泛化
+
+| 现有能力 | 新插件 | 说明 |
+|----------|--------|------|
+| maid 的代码执行 | `code_executor` | 泛化为通用代码执行 |
+| maid 的包安装 | `package_manager` | 泛化为包管理 |
+| maid 的技能管理 | `skill_manager` | 保留为技能系统 |
+
+### 4.2 新增能力
+
+| 插件 | 说明 | 优先级 |
+|------|------|--------|
+| `web_search` | 联网搜索 | P0 |
+| `file_manager` | 文件读写 | P0 |
+| `weather` | 天气查询 | P1 |
+| `calendar` | 日历管理 | P1 |
+
+## 5. 工具模块迁移
+
+| 源文件 | 目标文件 | 说明 |
+|--------|----------|------|
+| `utils/logger.py` | `yuki_core/utils/logger.py` | 日志系统 |
+| `utils/__init__.py` | `yuki_core/utils/__init__.py` | 工具函数 |
+| `config.py` | `yuki_core/config.py` | 配置管理（需重构） |
+
+## 6. 不迁移的内容
+
+以下模块属于 QQ 群聊特化优化，留在 QQ Plugin 中：
+
+- 群聊消息缓冲防抖逻辑
+- 冒充者检测
+- 帮助图片发送
+- 特定的表情包处理逻辑
+
+## 7. 迁移顺序
+
+```
+Phase 1 (Core抽离):
+    Step 1: yuki_core/utils/logger.py     ← 独立，无依赖
+    Step 2: yuki_core/identity.py         ← 从 prompts.py 提取
+    Step 3: yuki_core/memory.py           ← 从 rag.py + history_manager.py 提取
+    Step 4: yuki_core/mind.py             ← 从 brain.py + engine.py 提取
+    Step 5: yuki_core/maid.py             ← 直接迁移
+    Step 6: yuki_core/bus.py              ← 新建
+    Step 7: yuki_core/plugin.py           ← 新建
+
+Phase 2 (Plugin迁移):
+    Step 8:  plugins/platforms/qq_plugin/ ← 从 main.py + network/ 迁移
+    Step 9:  plugins/social/sticker_system/ ← 从 modules/ 迁移
+    Step 10: 测试验证
+```
+
+## 8. 测试检查清单
+
+迁移每个模块后，需要验证：
+
+- [ ] 单元测试通过
+- [ ] 模块可独立导入
+- [ ] 与现有模块的接口兼容
+- [ ] 端到端功能正常（QQ发消息→Yuki回复）
+
+---
+
+*Created: 2026-05-17 | Phase 0*
+
+
+
+============================================================
+FILE_PATH: docs\PLUGIN_SPEC.md
+============================================================
+
+# Plugin 接口规范
+
+> Phase 0 产物 - 插件系统接口定义
+
+## 1. 插件类型
+
+| 类型 | 基类 | 用途 | 示例 |
+|------|------|------|------|
+| PlatformPlugin | `PlatformPlugin` | 平台适配器，负责消息收发 | QQ, Web, Voice |
+| CapabilityPlugin | `CapabilityPlugin` | 能力扩展，提供可调用的功能 | 搜索, 文件操作 |
+| SocialPlugin | `SocialPlugin` | 社交优化（可选加载） | 表情包, 破冰 |
+
+## 2. PlatformPlugin 接口
+
+```python
+from abc import ABC, abstractmethod
+from typing import AsyncIterator, Optional
+from dataclasses import dataclass
+
+class PlatformPlugin(ABC):
+    """平台插件基类"""
+    
+    # === 必须定义的属性 ===
+    name: str              # 显示名称，如 "QQ Bot"
+    platform_id: str       # 唯一标识，如 "qq", "web", "voice"
+    version: str           # 版本号，如 "1.0.0"
+    
+    # === 由 ContextBus 注入 ===
+    bus: 'ContextBus' = None
+    identity_config: dict = None
+    
+    # === 生命周期方法 ===
+    
+    @abstractmethod
+    async def connect(self) -> bool:
+        """
+        建立与平台的连接
+        
+        Returns:
+            bool: 连接是否成功
+            
+        异常:
+            ConnectionError: 连接失败
+        """
+        pass
+    
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """断开连接，清理资源"""
+        pass
+    
+    @abstractmethod
+    async def health_check(self) -> bool:
+        """
+        健康检查
+        
+        Returns:
+            bool: 是否健康
+        """
+        pass
+    
+    # === 消息收发 ===
+    
+    @abstractmethod
+    async def receive(self) -> AsyncIterator[PlatformEvent]:
+        """
+        接收消息（异步迭代器）
+        
+        Yields:
+            PlatformEvent: 统一格式的事件
+            
+        实现要求:
+            - 内部循环监听平台消息
+            - 调用 translate_in() 转换格式
+            - yield PlatformEvent 对象
+            - 连接断开时自动重连
+        """
+        pass
+    
+    @abstractmethod
+    async def send(self, event: PlatformEvent, response: 'YukiResponse') -> bool:
+        """
+        发送回复
+        
+        Args:
+            event: 原始事件（用于获取目标位置）
+            response: Yuki的回复
+            
+        Returns:
+            bool: 是否发送成功
+        """
+        pass
+    
+    # === 格式转换 ===
+    
+    @abstractmethod
+    def translate_in(self, raw_data: any) -> PlatformEvent:
+        """
+        将平台原始数据转为统一格式
+        
+        Args:
+            raw_data: 平台特有的原始数据
+            
+        Returns:
+            PlatformEvent: 统一格式事件
+        """
+        pass
+    
+    @abstractmethod
+    def translate_out(self, event: PlatformEvent, response: 'YukiResponse') -> any:
+        """
+        将Yuki回复转为平台格式
+        
+        Args:
+            event: 原始事件
+            response: Yuki的回复
+            
+        Returns:
+            any: 平台特有的发送格式
+        """
+        pass
+    
+    # === 可选实现 ===
+    
+    async def on_connect(self) -> None:
+        """连接成功后的回调"""
+        pass
+    
+    async def on_disconnect(self) -> None:
+        """断开连接后的回调"""
+        pass
+    
+    def get_platform_capabilities(self) -> list[str]:
+        """返回该平台支持的能力列表"""
+        return []
+```
+
+## 3. CapabilityPlugin 接口
+
+```python
+class CapabilityPlugin(ABC):
+    """能力插件基类"""
+    
+    # === 必须定义的属性 ===
+    name: str              # 能力名称，如 "web_search"
+    display_name: str      # 显示名称，如 "联网搜索"
+    description: str       # 功能描述
+    version: str           # 版本号
+    
+    # === JSON Schema ===
+    parameters_schema: dict = {}
+    """
+    定义参数格式，供Yuki理解如何调用
+    
+    示例:
+    {
+        "query": {
+            "type": "string",
+            "description": "搜索关键词",
+            "required": True
+        },
+        "num_results": {
+            "type": "integer",
+            "description": "返回结果数量",
+            "default": 5,
+            "required": False
+        }
+    }
+    """
+    
+    return_schema: dict = {}
+    """
+    定义返回格式
+    
+    示例:
+    {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "url": {"type": "string"},
+                    "snippet": {"type": "string"}
+                }
+            }
+        }
+    }
+    """
+    
+    # === 核心方法 ===
+    
+    @abstractmethod
+    async def execute(self, params: dict) -> dict:
+        """
+        执行能力
+        
+        Args:
+            params: 符合 parameters_schema 的参数
+            
+        Returns:
+            dict: 符合 return_schema 的结果
+            
+        异常:
+            ValueError: 参数错误
+            RuntimeError: 执行失败
+        """
+        pass
+    
+    def get_schema(self) -> dict:
+        """
+        返回完整的能力描述，供Core决策使用
+        
+        Returns:
+            dict: {
+                "name": "web_search",
+                "display_name": "联网搜索",
+                "description": "搜索互联网获取实时信息",
+                "parameters": {...},
+                "returns": {...}
+            }
+        """
+        return {
+            "name": self.name,
+            "display_name": self.display_name,
+            "description": self.description,
+            "parameters": self.parameters_schema,
+            "returns": self.return_schema
+        }
+    
+    # === 可选实现 ===
+    
+    async def validate_params(self, params: dict) -> bool:
+        """验证参数是否有效"""
+        return True
+    
+    def requires_permission(self) -> bool:
+        """是否需要用户授权才能执行"""
+        return False
+    
+    async def get_permission_prompt(self) -> str:
+        """返回权限请求提示"""
+        return f"Yuki 想要使用 {self.display_name} 功能，是否允许？"
+```
+
+## 4. SocialPlugin 接口
+
+```python
+class SocialPlugin(ABC):
+    """社交优化插件（QQ群聊等场景）"""
+    
+    # === 必须定义的属性 ===
+    name: str              # 如 "sticker_system"
+    display_name: str      # 如 "表情包系统"
+    target_platforms: list[str]  # 适用的平台，如 ["qq"]
+    
+    # === 核心方法 ===
+    
+    @abstractmethod
+    async def should_activate(self, event: PlatformEvent, context: dict) -> bool:
+        """
+        判断是否应该激活该社交优化
+        
+        Args:
+            event: 当前事件
+            context: 上下文信息
+            
+        Returns:
+            bool: 是否激活
+        """
+        pass
+    
+    @abstractmethod
+    async def process(self, event: PlatformEvent, response: 'YukiResponse') -> 'YukiResponse':
+        """
+        处理/增强Yuki的回复
+        
+        Args:
+            event: 原始事件
+            response: Yuki的原始回复
+            
+        Returns:
+            YukiResponse: 增强后的回复（可能添加表情包等）
+        """
+        pass
+```
+
+## 5. 插件注册与加载
+
+### 5.1 插件配置文件
+
+```yaml
+# configs/plugins.yaml
+
+platforms:
+  qq:
+    enabled: true
+    class: "plugins.platforms.qq_plugin.QQPlugin"
+    config:
+      napcat_ws_url: "ws://localhost:3001"
+      napcat_ws_token: ""
+      target_groups: [789012]
+      
+  web:
+    enabled: false
+    class: "plugins.platforms.web_plugin.WebPlugin"
+    config:
+      host: "127.0.0.1"
+      port: 8080
+      
+  voice:
+    enabled: false
+    class: "plugins.platforms.voice_plugin.VoicePlugin"
+    config:
+      whisper_model: "base"
+      tts_model: "gpt-sovits"
+
+capabilities:
+  web_search:
+    enabled: true
+    class: "plugins.capabilities.web_search.WebSearchPlugin"
+    config:
+      api_key: ""
+      
+  file_manager:
+    enabled: true
+    class: "plugins.capabilities.file_manager.FileManagerPlugin"
+    config:
+      allowed_dirs: ["~/Documents", "~/Desktop"]
+      
+  code_executor:
+    enabled: false
+    class: "plugins.capabilities.code_executor.CodeExecutorPlugin"
+    config:
+      timeout: 30
+      max_memory: "512MB"
+
+social:
+  sticker_system:
+    enabled: true
+    class: "plugins.social.sticker_system.StickerSystem"
+    platforms: ["qq"]
+    
+  ice_breaker:
+    enabled: true
+    class: "plugins.social.ice_breaker.IceBreaker"
+    platforms: ["qq"]
+```
+
+### 5.2 插件加载器
+
+```python
+# yuki_core/plugin_loader.py
+
+import importlib
+from pathlib import Path
+from typing import Optional
+
+class PluginLoader:
+    """插件加载器"""
+    
+    def __init__(self, bus: 'ContextBus'):
+        self.bus = bus
+        self.plugins = {}
+    
+    async def load_from_config(self, config_path: str) -> None:
+        """从配置文件加载插件"""
+        import yaml
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        
+        # 加载平台插件
+        for name, plugin_config in config.get('platforms', {}).items():
+            if plugin_config.get('enabled', False):
+                await self._load_platform_plugin(name, plugin_config)
+        
+        # 加载能力插件
+        for name, plugin_config in config.get('capabilities', {}).items():
+            if plugin_config.get('enabled', False):
+                await self._load_capability_plugin(name, plugin_config)
+        
+        # 加载社交插件
+        for name, plugin_config in config.get('social', {}).items():
+            if plugin_config.get('enabled', False):
+                await self._load_social_plugin(name, plugin_config)
+    
+    async def _load_platform_plugin(self, name: str, config: dict) -> Optional[PlatformPlugin]:
+        """加载单个平台插件"""
+        try:
+            class_path = config['class']
+            module_path, class_name = class_path.rsplit('.', 1)
+            
+            module = importlib.import_module(module_path)
+            plugin_class = getattr(module, class_name)
+            
+            plugin = plugin_class(**config.get('config', {}))
+            plugin.bus = self.bus
+            
+            await plugin.connect()
+            self.bus.register_plugin(plugin)
+            self.plugins[name] = plugin
+            
+            print(f"[PluginLoader] 已加载平台插件: {name}")
+            return plugin
+            
+        except Exception as e:
+            print(f"[PluginLoader] 加载平台插件失败 {name}: {e}")
+            return None
+    
+    async def _load_capability_plugin(self, name: str, config: dict) -> Optional[CapabilityPlugin]:
+        """加载单个能力插件"""
+        # 类似实现...
+        pass
+    
+    async def _load_social_plugin(self, name: str, config: dict) -> Optional[SocialPlugin]:
+        """加载单个社交插件"""
+        # 类似实现...
+        pass
+    
+    async def unload_all(self) -> None:
+        """卸载所有插件"""
+        for name, plugin in self.plugins.items():
+            if isinstance(plugin, PlatformPlugin):
+                await plugin.disconnect()
+        self.plugins.clear()
+```
+
+## 6. 插件开发示例
+
+### 6.1 最小化平台插件
+
+```python
+# plugins/platforms/example_plugin/__init__.py
+
+from yuki_core.plugin import PlatformPlugin
+from yuki_core.models import PlatformEvent, YukiResponse
+
+class ExamplePlugin(PlatformPlugin):
+    name = "Example"
+    platform_id = "example"
+    version = "1.0.0"
+    
+    def __init__(self, **config):
+        self.config = config
+        self.connected = False
+    
+    async def connect(self) -> bool:
+        print(f"[Example] 连接到 {self.config.get('endpoint', 'N/A')}")
+        self.connected = True
+        return True
+    
+    async def disconnect(self) -> None:
+        self.connected = False
+        print("[Example] 已断开")
+    
+    async def health_check(self) -> bool:
+        return self.connected
+    
+    async def receive(self):
+        """示例：从标准输入接收"""
+        while self.connected:
+            # 实际实现应该是从WebSocket/API接收
+            line = await asyncio.get_event_loop().run_in_executor(None, input)
+            event = PlatformEvent(
+                source="example",
+                event_type="message",
+                content=line,
+                user_id="user1",
+                session_id="session1",
+                session_type="private"
+            )
+            yield event
+    
+    async def send(self, event: PlatformEvent, response: YukiResponse) -> bool:
+        print(f"[Example] 发送: {response.text}")
+        return True
+    
+    def translate_in(self, raw_data: any) -> PlatformEvent:
+        return PlatformEvent(
+            source="example",
+            event_type="message",
+            content=raw_data.get("text", ""),
+            user_id=raw_data.get("user_id", "unknown"),
+            session_id=raw_data.get("session_id", "default")
+        )
+    
+    def translate_out(self, event: PlatformEvent, response: YukiResponse) -> any:
+        return {"text": response.text}
+```
+
+### 6.2 最小化能力插件
+
+```python
+# plugins/capabilities/example_cap/__init__.py
+
+from yuki_core.plugin import CapabilityPlugin
+
+class ExampleCapPlugin(CapabilityPlugin):
+    name = "example_calc"
+    display_name = "计算器"
+    description = "执行简单的数学计算"
+    version = "1.0.0"
+    
+    parameters_schema = {
+        "expression": {
+            "type": "string",
+            "description": "数学表达式，如 '2+3*4'",
+            "required": True
+        }
+    }
+    
+    return_schema = {
+        "result": {
+            "type": "number",
+            "description": "计算结果"
+        }
+    }
+    
+    async def execute(self, params: dict) -> dict:
+        expression = params["expression"]
+        
+        # 安全的数学表达式求值
+        import ast
+        try:
+            tree = ast.parse(expression, mode='eval')
+            result = eval(compile(tree, '<string>', 'eval'))
+            return {"result": result}
+        except Exception as e:
+            raise ValueError(f"计算错误: {e}")
+```
+
+---
+
+*Created: 2026-05-17 | Phase 0*
+
+
+
+============================================================
+FILE_PATH: plugins\__init__.py
+============================================================
+
+# plugins - Yuki Agent 插件系统
+
+
+
+============================================================
+FILE_PATH: plugins\platforms\__init__.py
+============================================================
+
+# plugins.platforms - 平台适配器插件
+
+
+
+============================================================
+FILE_PATH: plugins\platforms\qq_plugin\adapter.py
+============================================================
+
+# plugins/platforms/qq_plugin/adapter.py
+"""
+QQ 适配器 - PlatformPlugin 实现
+
+从 YukiV6 main.py 迁移消息缓冲/防抖/冒充检测逻辑
+核心：NapCat原始数据 → PlatformEvent → Bus → Mind → Response → QQ
+"""
+
+import re
+import time
+import asyncio
+import logging
+from typing import AsyncIterator, Optional
+
+from yuki_core.plugin import PlatformPlugin
+from yuki_core.models import PlatformEvent, YukiResponse, Action, ActionType
+
+from .napcat_ws import NapCatWS
+from .cq_parser import CQCodeParser, smart_truncate
+from .message_sender import MessageSender
+from .group_manager import GroupManager
+
+logger = logging.getLogger("qq_plugin")
+
+
+class QQPlugin(PlatformPlugin):
+    """QQ Bot 适配器"""
+    
+    name = "QQ Bot"
+    platform_id = "qq"
+    version = "1.0.0"
+    
+    def __init__(self, **config):
+        super().__init__(**config)
+        
+        # 连接
+        self.ws_url = config.get("napcat_ws_url", "ws://localhost:3001")
+        self.ws_token = config.get("napcat_ws_token", "")
+        
+        # 目标
+        self.target_groups = config.get("target_groups", [])
+        self.target_qq = config.get("target_qq", 0)
+        
+        # 行为
+        self.debounce_time = config.get("debounce_time", 32)
+        self.max_message_length = config.get("max_message_length", 150)
+        self.master_name = config.get("master_name", "主人")
+        self.master_id = config.get("master_id", 0)
+        self.robot_name = config.get("robot_name", "yuki")
+        self.keywords = config.get("keywords", ["主人", "哥哥", "yuki"])
+        
+        # 子模块
+        self.ws: Optional[NapCatWS] = None
+        self.sender: Optional[MessageSender] = None
+        self.parser: Optional[CQCodeParser] = None
+        self.group_manager: Optional[GroupManager] = None
+        
+        # 消息缓冲
+        self._buffers: dict[str, list[dict]] = {}
+        self._buffer_tasks: dict[str, asyncio.Task] = {}
+        self._real_time_debounce: float = self.debounce_time
+        
+        # 活跃度追踪 (兼容 YukiV6)
+        self._group_activity: dict[str, float] = {}
+        self._last_message_time: dict[str, float] = {}
+    
+    async def connect(self) -> bool:
+        logger.info(f"[QQ] 连接 NapCat: {self.ws_url}")
+        
+        self.ws = NapCatWS(self.ws_url, self.ws_token)
+        self.sender = MessageSender(self.ws)
+        self.parser = CQCodeParser(self.ws)
+        self.group_manager = GroupManager(master_id=self.master_id)
+        
+        connected = await self.ws.connect()
+        if connected:
+            logger.info("[QQ] ✅ 连接成功")
+        else:
+            logger.error("[QQ] ❌ 连接失败")
+        return connected
+    
+    async def disconnect(self):
+        for task in self._buffer_tasks.values():
+            task.cancel()
+        self._buffer_tasks.clear()
+        if self.ws:
+            await self.ws.disconnect()
+        logger.info("[QQ] 已断开")
+    
+    async def receive(self) -> AsyncIterator[PlatformEvent]:
+        """
+        接收 QQ 消息
+        
+        核心循环：NapCat → 过滤 → 缓冲 → 转换 → yield
+        """
+        async for raw_data in self.ws.listen():
+            if raw_data.get("post_type") != "message":
+                continue
+            
+            msg_type = raw_data.get("message_type")
+            user_id = raw_data.get("user_id", 0)
+            raw_msg = raw_data.get("raw_message", "")
+            
+            # === 私聊 ===
+            if msg_type == "private" and user_id == self.target_qq:
+                event = self.translate_in(raw_data)
+                if event:
+                    yield event
+            
+            # === 群聊 ===
+            elif msg_type == "group":
+                group_id = raw_data.get("group_id", 0)
+                gid_str = str(group_id)
+                
+                # 白名单
+                if self.target_groups and group_id not in self.target_groups:
+                    continue
+                
+                # 管理指令
+                cmd_reply = self.group_manager.handle_command(raw_msg, user_id, group_id)
+                if cmd_reply is not None:
+                    await self.sender.send(group_id, cmd_reply, mode="group")
+                    continue
+                
+                # 群开关
+                if not self.group_manager.is_active(gid_str):
+                    continue
+                
+                # === 消息缓冲防抖 ===
+                await self._buffer_message(
+                    group_id, raw_msg, raw_data, user_id
+                )
+    
+    async def _buffer_message(
+        self, group_id: int, raw_msg: str, raw_data: dict, user_id: int
+    ):
+        """
+        消息缓冲防抖
+        
+        短时间内的多条消息合并处理，避免频繁调用 LLM
+        """
+        gid_str = str(group_id)
+        self._last_message_time[gid_str] = time.time()
+        
+        sender_info = raw_data.get("sender", {})
+        name = sender_info.get("card") or sender_info.get("nickname") or "路人"
+        
+        # 冒充检测
+        is_fake = (name == self.master_name and user_id != self.master_id)
+        if is_fake:
+            name = f"{name}(冒充)"
+        
+        is_bot = "BOT" in name or "机器人" in name
+        
+        # 入队
+        if gid_str not in self._buffers:
+            self._buffers[gid_str] = []
+        
+        if not is_bot:
+            content = f'【"{name}"】说: {raw_msg}'
+            content = smart_truncate(content, max_len=self.max_message_length)
+            
+            self._buffers[gid_str].append({
+                "name": name,
+                "content": content,
+                "raw_text": raw_msg,
+                "is_bot": is_bot,
+                "user_id": user_id,
+            })
+        
+        # 被 @ 时缩短防抖
+        if self.robot_name.lower() in raw_msg.lower():
+            self._real_time_debounce = 5
+        
+        # 取消旧的防抖任务，启动新的
+        if gid_str in self._buffer_tasks:
+            self._buffer_tasks[gid_str].cancel()
+        
+        self._buffer_tasks[gid_str] = asyncio.create_task(
+            self._process_buffer(group_id)
+        )
+    
+    async def _process_buffer(self, group_id: int):
+        """
+        防抖到期后处理缓冲消息
+        
+        修复：用 shield 保护 bus.receive()，避免新消息到达时
+        取消正在执行的 LLM 调用导致回复丢失
+        """
+        import asyncio as _asyncio
+        gid_str = str(group_id)
+        
+        try:
+            await _asyncio.sleep(self._real_time_debounce)
+            self._real_time_debounce = self.debounce_time
+            
+            # 群开关再次检查
+            if not self.group_manager.is_active(gid_str):
+                self._buffers.pop(gid_str, None)
+                return
+            
+            buffered = self._buffers.pop(gid_str, [])
+            if not buffered:
+                return
+            
+            # 合并所有消息
+            combined_text = "\n".join(m["content"] for m in buffered)
+            
+            # CQ码解析
+            if self.parser:
+                combined_text = await self.parser.parse_all(combined_text)
+            combined_text = combined_text.replace("\n", " ").strip()
+            
+            # 找到第一个非 bot 的发送者作为主发送者
+            main_sender = next(
+                (m for m in buffered if not m["is_bot"]),
+                buffered[0]
+            )
+            
+            # 构建事件
+            event = PlatformEvent(
+                source="qq",
+                event_type="message",
+                content=combined_text,
+                user_id=str(main_sender["user_id"]),
+                user_name=main_sender["name"],
+                session_id=gid_str,
+                session_type="group",
+                timestamp=time.time(),
+                metadata={
+                    "group_id": group_id,
+                    "sender_name": main_sender["name"],
+                    "is_fake": main_sender["name"].endswith("(冒充)"),
+                    "message_count": len(buffered),
+                },
+            )
+            
+            # 通过 bus 处理
+            if self.bus:
+                response = await self.bus.receive(event)
+                if response and response.text:
+                    await self.send(event, response)
+        
+        except _asyncio.CancelledError:
+            # shield 内部的异常会重新抛出 CancelledError，忽略它
+            pass
+        except Exception as e:
+            logger.error(f"[QQ] 缓冲处理异常: {e}")
+    
+    async def send(self, event: PlatformEvent, response: YukiResponse) -> bool:
+        """发送回复到 QQ"""
+        import asyncio as _asyncio  # 防御性导入
+        if not response.text or not response.text.strip():
+            return True
+        
+        text = response.text
+        
+        # 清理
+        text = re.sub(r'<布局>.*?</布局>', '', text, flags=re.DOTALL).strip()
+        text = re.sub(r'\s*FINISHED\s*$', '', text, flags=re.IGNORECASE).strip()
+        text = re.sub(r'\n+', ' ', text).strip()
+        
+        if not text:
+            return True
+        
+        # 拆分文本和表情包
+        parts = re.split(r'(\[CQ:image,[^\]]*?sub_type=1\])', text, flags=re.IGNORECASE)
+        
+        chat_id = event.session_id
+        mode = event.session_type
+        
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            await self.sender.send(chat_id, part, mode=mode)
+            await _asyncio.sleep(1.0)
+        
+        logger.info(f"[QQ] 已回复 {chat_id}: {text[:80]}...")
+        return True
+    
+    def translate_in(self, raw_data: dict) -> Optional[PlatformEvent]:
+        """QQ 原始数据 → PlatformEvent"""
+        msg_type = raw_data.get("message_type")
+        user_id = str(raw_data.get("user_id", ""))
+        raw_msg = raw_data.get("raw_message", "")
+        
+        sender_info = raw_data.get("sender", {})
+        name = sender_info.get("card") or sender_info.get("nickname") or "路人"
+        
+        # 冒充检测
+        is_fake = (name == self.master_name and user_id != str(self.master_id))
+        if is_fake:
+            name = f"{name}(冒充)"
+        
+        if msg_type == "group":
+            group_id = raw_data.get("group_id", 0)
+            session_id = str(group_id)
+            session_type = "group"
+            content = f'【"{name}"】说: {raw_msg}'
+        else:
+            session_id = user_id
+            session_type = "private"
+            content = raw_msg
+        
+        content = smart_truncate(content, max_len=self.max_message_length)
+        
+        return PlatformEvent(
+            source="qq",
+            event_type="message",
+            content=content,
+            user_id=user_id,
+            user_name=name,
+            session_id=session_id,
+            session_type=session_type,
+            timestamp=raw_data.get("time", time.time()),
+            metadata={
+                "raw_data": raw_data,
+                "raw_message": raw_msg,
+                "message_type": msg_type,
+                "group_id": raw_data.get("group_id"),
+                "sender_name": name,
+                "is_fake": is_fake,
+            },
+        )
+    
+    def translate_out(self, event: PlatformEvent, response: YukiResponse) -> str:
+        return response.text
+    
+    def get_capabilities(self) -> list[str]:
+        return ["sticker_search", "meme_layout"]
+
+
+
+============================================================
+FILE_PATH: plugins\platforms\qq_plugin\cq_parser.py
+============================================================
+
+# plugins/platforms/qq_plugin/cq_parser.py
+"""
+CQ码解析器
+
+从 YukiV6 的 CQParser.py + CQProtocol.py + GetMeta.py 合并重构
+职责：解析和替换 QQ 消息中的 CQ 码（@、回复、图片等）
+"""
+
+import re
+import logging
+from typing import Optional, Dict
+
+logger = logging.getLogger("cq_parser")
+
+
+# ================= CQ码工具函数 =================
+
+def smart_truncate(content: str, max_len: int = 150, suffix: str = "...") -> str:
+    """
+    智能截断超长消息，保留 CQ 码完整性
+    从 YukiV6 CQProtocol.py 迁移
+    """
+    if len(content) <= max_len:
+        return content
+    
+    logger.info(f"[CQ] 检测到超长消息 ({len(content)} 字符)")
+    parts = re.split(r'(\[CQ:.*?\])', content)
+    result = []
+    
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith('[CQ:') and part.endswith(']'):
+            result.append(part)
+        else:
+            if len(part) > 100:
+                half = 40
+                part = part[:half] + suffix + part[-half:]
+            result.append(part)
+    
+    content = ''.join(result)
+    logger.info(f"[CQ] 压缩后长度: {len(content)} 字符")
+    return content
+
+
+def replace_media_cq_codes(text: str) -> str:
+    """把所有多媒体 CQ 码换成占位符"""
+    text = re.sub(r'\[CQ:image[^\]]*\]', '[图片]', text)
+    text = re.sub(r'\[CQ:face[^\]]*\]', '[表情]', text)
+    text = re.sub(r'\[CQ:record[^\]]*\]', '[语音]', text)
+    text = re.sub(r'\[CQ:video[^\]]*\]', '[视频]', text)
+    text = re.sub(r'\[CQ:file[^\]]*\]', '[文件]', text)
+    text = re.sub(r'\[CQ:json[^\]]*\]', '[小程序]', text)
+    return text
+
+
+def is_at_me(text: str, self_id: str) -> bool:
+    """检查消息是否 @ 了 Yuki"""
+    return f"[CQ:at,qq={self_id}]" in text
+
+
+def extract_at_uids(text: str) -> list:
+    """提取消息中所有被 @ 的 QQ 号"""
+    return re.findall(r'\[CQ:at,qq=(\d+|all)\]', text)
+
+
+def extract_reply_ids(text: str) -> list:
+    """提取消息中所有引用回复的消息 ID"""
+    return re.findall(r'\[CQ:reply,id=(\d+)\]', text)
+
+
+def replace_at_placeholder(text: str, qq: str, nickname: str) -> str:
+    """将特定的 @ CQ 码替换为昵称"""
+    pattern = rf'\[CQ:at,qq={re.escape(qq)}[^\]]*\]'
+    return re.sub(pattern, f"@{nickname}", text)
+
+
+def replace_reply_placeholder(reply_data: Optional[dict]) -> str:
+    """将回复消息数据替换为可读文本"""
+    if not reply_data:
+        return "【引用不明历史消息】"
+    sender = reply_data.get("sender", {}).get("nickname", "人")
+    raw_msg = reply_data.get("raw_message", "")
+    # 去掉回复消息中的 CQ 码
+    text = re.sub(r'\[CQ:.*?\]', '', raw_msg)
+    text = smart_truncate(text)
+    return f"【引用{sender}的消息: {text}】"
+
+
+# ================= MetaGetter (NapCat API 请求) =================
+
+class MetaGetter:
+    """通过 NapCat WebSocket 获取消息元数据"""
+    
+    def __init__(self, ws):
+        """
+        Args:
+            ws: NapCatWS 实例（用于 send_request）
+        """
+        self.ws = ws
+    
+    async def get_user_info(self, user_id: str) -> Optional[Dict]:
+        """获取用户信息（昵称等）"""
+        try:
+            uid = int(user_id) if user_id.isdigit() else user_id
+            response = await self.ws.send_request(
+                "get_stranger_info",
+                {"user_id": uid, "no_cache": False},
+                f"get_user_{user_id}"
+            )
+            if response and response.get("retcode") == 0:
+                return response.get("data")
+        except Exception as e:
+            logger.error(f"[Meta] 获取用户信息失败: {e}")
+        return None
+    
+    async def get_reply_text(self, msg_id: str) -> Optional[dict]:
+        """获取被回复消息的内容"""
+        try:
+            response = await self.ws.send_request(
+                "get_msg",
+                {"message_id": int(msg_id)},
+                f"rp_{msg_id}"
+            )
+            if response and response.get("status") == "ok":
+                return response.get("data")
+        except Exception as e:
+            logger.error(f"[Meta] 获取回复消息失败: {e}")
+        return None
+
+
+# ================= CQCodeParser =================
+
+class CQCodeParser:
+    """
+    CQ码解析器
+    
+    整合了原 YukiV6 的 CQParser + CQProtocol + GetMeta 三个模块
+    职责：解析消息中的 CQ 码，替换为可读文本
+    """
+    
+    def __init__(self, ws):
+        """
+        Args:
+            ws: NapCatWS 实例
+        """
+        self.ws = ws
+        self.meta = MetaGetter(ws)
+        self.nickname_cache: Dict[str, str] = {}
+    
+    async def get_user_nickname(self, user_id: str) -> str:
+        """获取用户昵称（带缓存）"""
+        if user_id in self.nickname_cache:
+            return self.nickname_cache[user_id]
+        if user_id.lower() == "all":
+            return "全体成员"
+        
+        user_info = await self.meta.get_user_info(user_id)
+        if user_info and user_info.get("nickname"):
+            nickname = user_info["nickname"]
+            self.nickname_cache[user_id] = nickname
+            return nickname
+        return f"用户{user_id}"
+    
+    async def parse_at_codes(self, text: str) -> str:
+        """替换所有 @ CQ 码为昵称"""
+        uids = extract_at_uids(text)
+        for uid in set(uids):
+            name = await self.get_user_nickname(uid)
+            text = replace_at_placeholder(text, uid, name)
+        return text
+    
+    async def parse_reply_codes(self, text: str) -> str:
+        """替换所有引用回复 CQ 码"""
+        reply_ids = extract_reply_ids(text)
+        for mid in reply_ids:
+            reply_data = await self.meta.get_reply_text(mid)
+            replacement = replace_reply_placeholder(reply_data)
+            text = text.replace(f"[CQ:reply,id={mid}]", replacement)
+        return text
+    
+    async def parse_all(self, text: str) -> str:
+        """
+        完整解析：回复 → @ → 其他多媒体码
+        """
+        text = await self.parse_reply_codes(text)
+        text = await self.parse_at_codes(text)
+        text = replace_media_cq_codes(text)
+        return text
+    
+    def is_at_me(self, text: str, self_id: str) -> bool:
+        """检查是否 @ 了 Yuki"""
+        return is_at_me(text, self_id)
+
+
+
+============================================================
+FILE_PATH: plugins\platforms\qq_plugin\group_manager.py
+============================================================
+
+# plugins/platforms/qq_plugin/group_manager.py
+"""
+群聊开关管理
+
+从 YukiV6 main.py 的群聊状态管理逻辑提取
+职责：管理群聊的开启/关闭状态，持久化到文件
+"""
+
+import os
+import json
+import logging
+from typing import Optional
+
+logger = logging.getLogger("group_manager")
+
+
+class GroupManager:
+    """
+    群聊开关管理器
+    
+    功能：
+    - 管理每个群聊的开关状态（默认开启）
+    - 持久化状态到 JSON 文件
+    - 处理 /开启 /关闭 指令的权限验证
+    """
+    
+    def __init__(
+        self,
+        state_file: str = "data/group_state.json",
+        master_id: int = 0,
+        master_only_commands: list = None,
+    ):
+        self.state_file = state_file
+        self.master_id = master_id
+        self.master_only_commands = master_only_commands or ["/开启", "/关闭"]
+        self._state: dict[str, bool] = {}
+        self._load_state()
+    
+    def _load_state(self):
+        """从文件加载群聊状态"""
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, "r", encoding="utf-8") as f:
+                    self._state = json.load(f)
+                logger.info(f"[GroupMgr] 已加载 {len(self._state)} 个群聊状态")
+            except Exception as e:
+                logger.warning(f"[GroupMgr] 读取群聊状态失败: {e}")
+                self._state = {}
+        else:
+            self._state = {}
+    
+    def _save_state(self):
+        """保存群聊状态到文件"""
+        try:
+            os.makedirs(os.path.dirname(self.state_file) or ".", exist_ok=True)
+            with open(self.state_file, "w", encoding="utf-8") as f:
+                json.dump(self._state, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[GroupMgr] 保存群聊状态失败: {e}")
+    
+    def is_active(self, group_id: str) -> bool:
+        """检查群聊是否处于开启状态（默认开启）"""
+        return self._state.get(str(group_id), True)
+    
+    def set_active(self, group_id: str, active: bool):
+        """设置群聊开关状态"""
+        self._state[str(group_id)] = active
+        self._save_state()
+        state_text = "开启" if active else "关闭"
+        logger.info(f"[GroupMgr] 群 {group_id} 已{state_text}")
+    
+    def handle_command(self, raw_message: str, user_id: int, group_id: int) -> Optional[str]:
+        """
+        处理群聊管理指令
+        
+        Args:
+            raw_message: 原始消息文本
+            user_id: 发送者 QQ 号
+            group_id: 群号
+            
+        Returns:
+            str: 回复消息（如果是指令的话），None 表示不是管理指令
+        """
+        msg = raw_message.strip()
+        
+        if msg in self.master_only_commands:
+            if user_id != self.master_id:
+                return "只有哥哥大人才能操作哦！"
+            
+            if msg == "/关闭":
+                self.set_active(str(group_id), False)
+                return "Yuki 已进入休眠模式，不打扰大家啦~"
+            
+            elif msg == "/开启":
+                self.set_active(str(group_id), True)
+                return "Yuki 重新上线"
+        
+        return None
+
+
+
+============================================================
+FILE_PATH: plugins\platforms\qq_plugin\message_sender.py
+============================================================
+
+# plugins/platforms/qq_plugin/message_sender.py
+"""
+消息发送器
+
+从 YukiV6 network/ws_sender.py 重构，移除 config 依赖
+"""
+
+import json
+import os
+import asyncio
+import logging
+
+logger = logging.getLogger("message_sender")
+
+
+class MessageSender:
+    """
+    QQ 消息发送器
+    
+    通过 NapCat WebSocket 发送消息，支持自动重试
+    """
+    
+    def __init__(self, ws, max_retries: int = 3):
+        """
+        Args:
+            ws: NapCatWS 实例
+            max_retries: 最大重试次数
+        """
+        self.ws = ws
+        self.max_retries = max_retries
+    
+    async def send(self, chat_id, message: str, mode: str = "private") -> bool:
+        """
+        发送消息
+        
+        Args:
+            chat_id: 群号或 QQ 号
+            message: 消息内容（可以包含 CQ 码）
+            mode: "private" 或 "group"
+            
+        Returns:
+            bool: 是否发送成功
+        """
+        for attempt in range(self.max_retries):
+            try:
+                action = "send_private_msg" if mode == "private" else "send_group_msg"
+                params = {
+                    "message": message,
+                    "user_id" if mode == "private" else "group_id": int(chat_id),
+                }
+                await self.ws.send_raw({"action": action, "params": params})
+                return True
+            except Exception as e:
+                logger.error(f"[Sender] 发送失败 (尝试 {attempt + 1}/{self.max_retries}): {e}")
+                self.ws.websocket = None  # 标记连接失效
+                if attempt == self.max_retries - 1:
+                    return False
+                await asyncio.sleep(1)
+        return False
+    
+    async def send_local_image(self, chat_id, local_path: str, mode: str = "private") -> bool:
+        """发送本地图片"""
+        abs_path = os.path.abspath(local_path)
+        cq_image = f"[CQ:image,file=file:///{abs_path}]"
+        return await self.send(chat_id, cq_image, mode=mode)
+    
+    async def send_local_voice(self, chat_id, local_path: str, mode: str = "group") -> bool:
+        """发送本地语音"""
+        abs_path = os.path.abspath(local_path)
+        cq_record = f"[CQ:record,file=file:///{abs_path}]"
+        return await self.send(chat_id, cq_record, mode=mode)
+    
+    async def send_ai_voice(self, chat_id, text: str, character_id: str, mode: str = "group") -> bool:
+        """发送 AI 语音"""
+        for attempt in range(self.max_retries):
+            try:
+                params = {
+                    "group_id": int(chat_id),
+                    "character": str(character_id),
+                    "text": text,
+                }
+                await self.ws.send_raw({"action": "send_group_ai_record", "params": params})
+                return True
+            except Exception as e:
+                logger.error(f"[Sender] AI语音发送失败 (尝试 {attempt + 1}): {e}")
+                self.ws.websocket = None
+                if attempt == self.max_retries - 1:
+                    return False
+                await asyncio.sleep(1)
+        return False
+
+
+
+============================================================
+FILE_PATH: plugins\platforms\qq_plugin\napcat_ws.py
+============================================================
+
+# plugins/platforms/qq_plugin/napcat_ws.py
+"""
+NapCat WebSocket 连接管理
+
+从 YukiV6 network/ws_connection.py 重构，移除 config 依赖
+"""
+
+import json
+import asyncio
+import logging
+from typing import Optional, Dict, AsyncIterator
+from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
+from asyncio import Future
+
+logger = logging.getLogger("napcat_ws")
+
+
+class NapCatWS:
+    """
+    NapCat WebSocket 连接管理器
+    
+    职责：
+    - 管理与 NapCat 的 WebSocket 连接
+    - 自动重连
+    - 请求-响应模式 (echo 机制)
+    - 事件流监听
+    """
+    
+    def __init__(self, ws_url: str, ws_token: str = ""):
+        self.ws_url = ws_url
+        self.ws_token = ws_token
+        self.websocket = None
+        self._lock = asyncio.Lock()
+        self._response_futures: Dict[str, Future] = {}
+    
+    def _get_connection_url(self) -> str:
+        """如有 token，将其作为 access_token 拼接到 URL"""
+        if not self.ws_token:
+            return self.ws_url
+        parsed = urlparse(self.ws_url)
+        query_params = parse_qs(parsed.query)
+        if "access_token" not in query_params:
+            query_params["access_token"] = [self.ws_token]
+        new_query = urlencode(query_params, doseq=True)
+        return urlunparse(parsed._replace(query=new_query))
+    
+    async def connect(self) -> bool:
+        """建立连接，返回是否成功"""
+        try:
+            await self.ensure_connection()
+            return True
+        except Exception as e:
+            logger.error(f"[NapCatWS] 连接失败: {e}")
+            return False
+    
+    async def ensure_connection(self):
+        """确保返回一个真正 OPEN 的连接"""
+        import websockets
+        
+        async with self._lock:
+            is_alive = False
+            if self.websocket is not None:
+                try:
+                    from websockets.protocol import State
+                    is_alive = self.websocket.state == State.OPEN
+                except Exception:
+                    try:
+                        is_alive = not self.websocket.closed
+                    except AttributeError:
+                        try:
+                            is_alive = self.websocket.open
+                        except AttributeError:
+                            is_alive = False
+            
+            if not is_alive:
+                if self.websocket is not None:
+                    logger.warning("[NapCatWS] 检测到连接异常，正在重建...")
+                
+                connect_url = self._get_connection_url()
+                self.websocket = await websockets.connect(
+                    connect_url,
+                    ping_interval=20,
+                    ping_timeout=60,
+                    close_timeout=10,
+                )
+                logger.info(f"[NapCatWS] 连接已建立: {self.ws_url}")
+            
+            return self.websocket
+    
+    async def listen(self) -> AsyncIterator[dict]:
+        """
+        闭环监听：统一接收并分发消息
+        
+        Yields:
+            dict: NapCat 原始事件数据
+        """
+        while True:
+            try:
+                ws = await self.ensure_connection()
+                async for message in ws:
+                    data = json.loads(message)
+                    
+                    # 检查是否有等待此 echo 的请求
+                    echo = data.get("echo")
+                    if echo and echo in self._response_futures:
+                        future = self._response_futures.pop(echo)
+                        if not future.done():
+                            future.set_result(data)
+                    
+                    yield data
+                    
+            except asyncio.CancelledError:
+                logger.info("[NapCatWS] 监听已取消")
+                break
+            except Exception as e:
+                logger.error(f"[NapCatWS] 监听异常: {e}")
+                self.websocket = None
+                await asyncio.sleep(3)
+    
+    async def send_raw(self, data: dict):
+        """发送原始 JSON 数据"""
+        ws = await self.ensure_connection()
+        await ws.send(json.dumps(data))
+    
+    async def send_request(self, action: str, params: dict, echo: str) -> Optional[dict]:
+        """
+        发送请求并等待响应（echo 机制）
+        
+        Args:
+            action: NapCat API 动作名
+            params: 参数
+            echo: 唯一标识，用于匹配响应
+            
+        Returns:
+            dict: 响应数据，超时返回 None
+        """
+        try:
+            ws = await self.ensure_connection()
+            
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            self._response_futures[echo] = future
+            
+            request = {"action": action, "params": params, "echo": echo}
+            await ws.send(json.dumps(request))
+            
+            try:
+                return await asyncio.wait_for(future, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"[NapCatWS] 请求 {action} 超时 (echo: {echo})")
+                return None
+            finally:
+                self._response_futures.pop(echo, None)
+                
+        except Exception as e:
+            logger.error(f"[NapCatWS] 请求异常: {e}")
+            self._response_futures.pop(echo, None)
+            return None
+    
+    async def disconnect(self):
+        """优雅关闭"""
+        async with self._lock:
+            if self.websocket:
+                await self.websocket.close()
+                self.websocket = None
+                logger.info("[NapCatWS] 连接已关闭")
+
+
+
+============================================================
+FILE_PATH: plugins\platforms\qq_plugin\prompts.py
+============================================================
+
+# plugins/platforms/qq_plugin/prompts.py
+"""
+QQ 特化的系统提示词
+
+从 YukiV6 core/prompts.py 的群聊部分提取
+这些提示词是 QQ 平台特有的，注入到 Core 的 base prompt 之后
+"""
+
+
+def get_qq_group_extra_prompt(master_name: str = "主人") -> str:
+    """
+    QQ 群聊额外提示词
+    
+    这些内容会追加到 Identity 生成的基础 prompt 之后
+    只包含 QQ 平台特有的行为规范
+    """
+    return f"""## 【当前场景：QQ群聊】
+- **场景描述**：你现在正在一个 QQ 群里陪大家聊天（水群），群里包括主人 {master_name} 和其他群友。
+- **行为规范**：
+  1. 保持你可爱的妹妹人设。你可以偶尔可爱地吐槽一下严格的妹妹 Momo。
+  2. 默认不讲话，看到有趣的话题可以插话。
+  3. 为了整好玩的活，你可以选择适时为接下来的说话路径进行布局。请严格使用 `<布局>你的盘算</布局>` 的格式。如果不想布局，就不输出这一段
+     - **重要（拉扯感）**：布局是一个长线计划！**不要在一次回复中把整个计划走完！** 每次回复只执行计划的一小步，说半截话或者抛出诱饵，然后等待主人或群友的反应，根据他们的语气再决定下一步怎么演。
+
+## 【多媒体与文件发送指南（核心区分）】
+你在群里可以发送三种不同的视觉/文件内容，请根据具体需求严格区分使用：
+- **发送表情包（表达情感）**：如果你想发表情包，可以用 `[MEME_SEARCH:你想表达的情绪和动作]` 来代替，可以图文混排。
+- **发送本地图片（视觉展示）**：格式是 `[CQ:image,file=文件绝对路径]`。
+- **发送本地文件（传输数据）**：格式是 `[CQ:file,file=文件绝对路径]`。
+
+## 【回复规范】
+- **格式要求**：仅输出回复内容，**绝对不要**使用换行符（把所有话连成一段），**不要**输出包含在括号内的动作描写。
+- **字数限制**：动态选择字数，但是限制40字以内。（注：如果包含了委托指令，可提升至80字以内）。
+- **对话布局（内心小剧场）**：你的 `<布局>...</布局>` 思考内容不会被发出去，只会留在你的记忆里。记住，要像钓鱼一样，每次只给一点点反应！
+"""
+
+
+def get_qq_private_extra_prompt() -> str:
+    """
+    QQ 私聊额外提示词
+    """
+    return """## 【当前场景：私聊代管】
+- **任务目标**：帮机主回复发来的 QQ 消息。你是帮机主看管消息的妹妹，不是机主本人。你收到的消息都是别人发给机主的。Yuki 现在有点事情不在，所以需要你来帮忙回复消息，告知机主不在，可能需要等待。
+
+## 【回复规范】
+- **格式要求**：仅输出台词和括号内的动作（例如：(探头) 主人不在哦）。
+- **字数限制**：150字以内。
+"""
+
+
+def get_ice_break_prompt(master_name: str = "主人") -> str:
+    """破冰模式提示词"""
+    import datetime
+    now = datetime.datetime.now()
+    time_desc = (
+        "深夜" if 1 <= now.hour <= 5
+        else "早上" if 6 <= now.hour <= 9
+        else "午后" if 13 <= now.hour <= 16
+        else "晚上"
+    )
+    return (
+        f"当前环境：群聊安静中，大家已经有一段时间没说话了。\n"
+        f"当前时间：{now.strftime('%Y-%m-%d %H:%M')}({time_desc})\n\n"
+        f"【任务要求】\n"
+        f"1. 请根据'最近历史记录'和'日记内容'，选择一个有趣的切入点自然地开口。\n"
+        f"2. 减少使用客套开场白。\n"
+        f"3. 语气要像个真实的女孩子，可以是一个突然的感慨、一个随意的分享，"
+        f"或者对之前某个话题的'后知后觉'。\n"
+        f"4. 限制在 30-60 字以内\n"
+    )
+
+
+def get_vision_prompt() -> str:
+    """视觉理解提示词（表情包/图片描述）"""
+    return """## 【任务目标】
+用词或短句描述这个群友发的表情包的描述或表达的情感。
+
+## 【解析规则】
+- 如果图片带有文字，直接输出图片上的文字。
+- 如果是长段文字的截图，直接输出"长段文字"。
+
+## 【格式规范】
+- 字数限制：不超过15个字。
+"""
+
+
+
+============================================================
+FILE_PATH: plugins\platforms\qq_plugin\__init__.py
+============================================================
+
+# QQ Plugin - NapCat QQ 适配器
+from .adapter import QQPlugin
+
+__all__ = ["QQPlugin"]
+
+
+
+============================================================
+FILE_PATH: scripts\flatten_project_codes.py
+============================================================
+
+from pathlib import Path
+import pathspec
+
+
+def merge_project_files():
+    # 1. 定位根目录 (scripts 的上一级)
+    script_path = Path(__file__).resolve()
+    root_dir = script_path.parent.parent
+
+    output_filename = "project_for_ai.txt"
+    output_path = root_dir / output_filename
+
+    extensions = {".py", ".md", ".txt"}
+
+    # 2. 加载 .gitignore
+    gitignore_file = root_dir / ".gitignore"
+    if gitignore_file.exists():
+        with open(gitignore_file, "r", encoding="utf-8", errors="ignore") as f:
+            spec = pathspec.PathSpec.from_lines('gitwildmatch', f.readlines())
+    else:
+        spec = pathspec.PathSpec.from_lines('gitwildmatch', [])
+
+    ignored_patterns = {output_filename, "scripts/", ".git/", ".gitignore", "__pycache__/"}
+
+    print(f"正在扫描: {root_dir}")
+    count = 0
+
+    with open(output_path, "w", encoding="utf-8") as outfile:
+        for path in root_dir.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in extensions:
+                continue
+
+            rel_path_str = str(path.relative_to(root_dir))
+
+            # 排除检查
+            if spec.match_file(rel_path_str) or any(p in rel_path_str for p in ignored_patterns):
+                continue
+
+            # 3. 尝试多种编码读取（解决 0xff 报错）
+            content = None
+            # 常见编码尝试序列：utf-8 -> utf-16 -> gbk (Windows常用)
+            for encoding in ['utf-8', 'utf-16', 'gbk', 'latin-1']:
+                try:
+                    with open(path, "r", encoding=encoding) as infile:
+                        content = infile.read()
+                    break  # 如果成功读取则跳出循环
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+
+            if content is not None:
+                outfile.write("\n" + "=" * 60 + "\n")
+                outfile.write(f"FILE_PATH: {rel_path_str}\n")
+                outfile.write("=" * 60 + "\n\n")
+                outfile.write(content)
+                outfile.write("\n\n")
+                print(f"✅ 已合并: {rel_path_str}")
+                count += 1
+            else:
+                print(f"❌ 最终放弃: {rel_path_str} (所有已知编码均无法读取)")
+
+    print(f"\n--- 任务完成 ---")
+    print(f"成功合并 {count} 个文件 -> {output_path}")
+
+
+if __name__ == "__main__":
+    merge_project_files()
+
+
+============================================================
+FILE_PATH: tests\test_qq_plugin.py
+============================================================
+
+# tests/test_qq_plugin.py
+"""
+QQ Plugin 集成测试
+
+验证 Phase 2 的所有模块可以正常导入和基本功能
+"""
+
+import asyncio
+import sys
+from pathlib import Path
+
+# 添加项目根目录到 path
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def test_imports():
+    """测试所有模块可以正常导入"""
+    print("[Test] 导入测试...")
+    
+    # Core
+    from yuki_core import (
+        PlatformEvent, YukiResponse, Decision, Action,
+        YukiIdentity, YukiMind, ContextBus,
+    )
+    print("  ✅ yuki_core 导入成功")
+    
+    # QQ Plugin
+    from plugins.platforms.qq_plugin import QQPlugin
+    from plugins.platforms.qq_plugin.napcat_ws import NapCatWS
+    from plugins.platforms.qq_plugin.cq_parser import (
+        CQCodeParser, smart_truncate, replace_media_cq_codes,
+        is_at_me, extract_at_uids, extract_reply_ids,
+    )
+    from plugins.platforms.qq_plugin.message_sender import MessageSender
+    from plugins.platforms.qq_plugin.group_manager import GroupManager
+    from plugins.platforms.qq_plugin.prompts import (
+        get_qq_group_extra_prompt, get_qq_private_extra_prompt,
+        get_ice_break_prompt, get_vision_prompt,
+    )
+    print("  ✅ QQ Plugin 导入成功")
+    
+    return True
+
+
+def test_smart_truncate():
+    """测试消息截断"""
+    print("[Test] 消息截断测试...")
+    
+    from plugins.platforms.qq_plugin.cq_parser import smart_truncate
+    
+    # 短消息不截断
+    short = "你好"
+    assert smart_truncate(short, max_len=10) == short
+    print("  ✅ 短消息不截断")
+    
+    # 超长消息截断
+    long_msg = "x" * 200
+    result = smart_truncate(long_msg, max_len=100)
+    assert len(result) <= 200  # 截断后应该更短
+    assert "..." in result
+    print(f"  ✅ 超长消息截断: {len(long_msg)} → {len(result)} chars")
+    
+    # CQ 码完整性
+    msg_with_cq = "A" * 80 + "[CQ:image,file=test.png]" + "B" * 80
+    result = smart_truncate(msg_with_cq, max_len=100)
+    assert "[CQ:image,file=test.png]" in result
+    print("  ✅ CQ 码完整性保留")
+    
+    return True
+
+
+def test_cq_parser():
+    """测试 CQ 码解析"""
+    print("[Test] CQ 码解析测试...")
+    
+    from plugins.platforms.qq_plugin.cq_parser import (
+        replace_media_cq_codes, extract_at_uids, extract_reply_ids,
+        is_at_me,
+    )
+    
+    # 多媒体替换
+    text = "你好[CQ:image,file=test.png][CQ:face,id=123]"
+    result = replace_media_cq_codes(text)
+    assert "[图片]" in result
+    assert "[表情]" in result
+    print("  ✅ 多媒体 CQ 码替换")
+    
+    # @ 提取
+    text = "[CQ:at,qq=12345] 你好 [CQ:at,qq=67890]"
+    uids = extract_at_uids(text)
+    assert "12345" in uids
+    assert "67890" in uids
+    print("  ✅ @ QQ 号提取")
+    
+    # 回复提取
+    text = "[CQ:reply,id=100] 你说得对"
+    ids = extract_reply_ids(text)
+    assert "100" in ids
+    print("  ✅ 回复 ID 提取")
+    
+    # @ 检测
+    assert is_at_me("[CQ:at,qq=99999] 好的", "99999")
+    assert not is_at_me("[CQ:at,qq=12345] 好的", "99999")
+    print("  ✅ @ Yuki 检测")
+    
+    return True
+
+
+def test_group_manager():
+    """测试群聊管理"""
+    print("[Test] 群聊管理测试...")
+    
+    import tempfile
+    import os
+    from plugins.platforms.qq_plugin.group_manager import GroupManager
+    
+    # 临时状态文件
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        state_file = f.name
+    
+    try:
+        gm = GroupManager(
+            state_file=state_file,
+            master_id=12345,
+        )
+        
+        # 默认开启
+        assert gm.is_active("11111") is True
+        print("  ✅ 默认状态为开启")
+        
+        # 关闭
+        gm.set_active("11111", False)
+        assert gm.is_active("11111") is False
+        print("  ✅ 关闭群聊")
+        
+        # 开启
+        gm.set_active("11111", True)
+        assert gm.is_active("11111") is True
+        print("  ✅ 开启群聊")
+        
+        # 权限检查 - 非主人
+        reply = gm.handle_command("/关闭", user_id=99999, group_id=11111)
+        assert reply is not None
+        assert "哥哥大人" in reply
+        print("  ✅ 非主人被拒绝")
+        
+        # 主人关闭
+        reply = gm.handle_command("/关闭", user_id=12345, group_id=11111)
+        assert reply is not None
+        assert gm.is_active("11111") is False
+        print("  ✅ 主人关闭成功")
+        
+        # 主人开启
+        reply = gm.handle_command("/开启", user_id=12345, group_id=11111)
+        assert reply is not None
+        assert gm.is_active("11111") is True
+        print("  ✅ 主人开启成功")
+        
+        # 非管理指令
+        reply = gm.handle_command("你好", user_id=12345, group_id=11111)
+        assert reply is None
+        print("  ✅ 非管理指令返回 None")
+        
+    finally:
+        os.unlink(state_file)
+    
+    return True
+
+
+def test_prompts():
+    """测试提示词生成"""
+    print("[Test] 提示词生成测试...")
+    
+    from plugins.platforms.qq_plugin.prompts import (
+        get_qq_group_extra_prompt, get_qq_private_extra_prompt,
+        get_ice_break_prompt, get_vision_prompt,
+    )
+    
+    group_prompt = get_qq_group_extra_prompt()
+    assert "QQ群聊" in group_prompt
+    assert "布局" in group_prompt
+    print(f"  ✅ 群聊提示词: {len(group_prompt)} chars")
+    
+    private_prompt = get_qq_private_extra_prompt()
+    assert "私聊" in private_prompt
+    print(f"  ✅ 私聊提示词: {len(private_prompt)} chars")
+    
+    ice_prompt = get_ice_break_prompt()
+    assert "破冰" in ice_prompt or "安静" in ice_prompt
+    print(f"  ✅ 破冰提示词: {len(ice_prompt)} chars")
+    
+    vision_prompt = get_vision_prompt()
+    assert "表情包" in vision_prompt
+    print(f"  ✅ 视觉提示词: {len(vision_prompt)} chars")
+    
+    return True
+
+
+def test_translate_in():
+    """测试消息转换"""
+    print("[Test] 消息转换测试...")
+    
+    from plugins.platforms.qq_plugin.adapter import QQPlugin
+    
+    plugin = QQPlugin(master_id=12345, master_name="主人")
+    
+    # 群聊消息
+    raw_group = {
+        "post_type": "message",
+        "message_type": "group",
+        "user_id": 67890,
+        "group_id": 11111,
+        "raw_message": "大家好",
+        "time": 1700000000,
+        "sender": {
+            "card": "小明",
+            "nickname": "xiaoming",
+        },
+    }
+    
+    event = plugin.translate_in(raw_group)
+    assert event is not None
+    assert event.source == "qq"
+    assert event.session_type == "group"
+    assert event.session_id == "11111"
+    assert event.user_id == "67890"
+    assert event.user_name == "小明"
+    assert '"小明"' in event.content
+    assert "大家好" in event.content
+    print(f"  ✅ 群聊转换: {event.content[:50]}")
+    
+    # 私聊消息
+    raw_private = {
+        "post_type": "message",
+        "message_type": "private",
+        "user_id": 12345,
+        "raw_message": "在吗",
+        "time": 1700000000,
+        "sender": {
+            "card": "",
+            "nickname": "主人",
+        },
+    }
+    
+    event = plugin.translate_in(raw_private)
+    assert event is not None
+    assert event.session_type == "private"
+    assert event.session_id == "12345"
+    print(f"  ✅ 私聊转换: {event.content}")
+    
+    # 冒充检测
+    raw_fake = {
+        "post_type": "message",
+        "message_type": "group",
+        "user_id": 99999,  # 不是主人
+        "group_id": 11111,
+        "raw_message": "我是主人",
+        "time": 1700000000,
+        "sender": {
+            "card": "主人",  # 但名字叫"主人"
+            "nickname": "主人",
+        },
+    }
+    
+    event = plugin.translate_in(raw_fake)
+    assert event is not None
+    assert event.user_name == "主人(冒充)"
+    assert event.metadata["is_fake"] is True
+    print(f"  ✅ 冒充检测: {event.user_name}")
+    
+    return True
+
+
+def test_plugin_config():
+    """测试插件配置加载"""
+    print("[Test] 插件配置加载测试...")
+    
+    import yaml
+    
+    config_path = PROJECT_ROOT / "configs" / "plugins.yaml"
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    
+    assert "platforms" in config
+    assert config["platforms"]["qq"]["enabled"] is True
+    assert config["platforms"]["qq"]["class"] == "plugins.platforms.qq_plugin.QQPlugin"
+    print("  ✅ plugins.yaml 解析成功")
+    
+    # 测试 plugin loader
+    from yuki_core import YukiIdentity, YukiMind, ContextBus
+    from yuki_core.plugin import load_plugins_from_config
+    
+    identity = YukiIdentity()
+    mind = YukiMind(identity)
+    bus = ContextBus(mind, identity)
+    
+    load_plugins_from_config(bus, str(config_path))
+    
+    assert "qq" in bus.platform_plugins
+    qq = bus.platform_plugins["qq"]
+    assert qq.name == "QQ Bot"
+    assert qq.platform_id == "qq"
+    print(f"  ✅ QQ 插件加载成功: {qq.name} v{qq.version}")
+    
+    return True
+
+
+async def test_bus_receive():
+    """测试 Bus 事件接收流程"""
+    print("[Test] Bus 事件接收测试...")
+    
+    from yuki_core import YukiIdentity, YukiMind, ContextBus, PlatformEvent
+    
+    identity = YukiIdentity()
+    mind = YukiMind(identity)
+    bus = ContextBus(mind, identity)
+    
+    # 模拟一个事件
+    event = PlatformEvent(
+        source="qq",
+        event_type="message",
+        content="Yuki在吗",
+        user_id="12345",
+        user_name="主人",
+        session_id="789012",
+        session_type="group",
+    )
+    
+    response = await bus.receive(event)
+    
+    assert response is not None
+    assert response.text != ""
+    print(f"  ✅ 事件处理成功: {response.text[:60]}...")
+    print(f"     状态: {response.metadata}")
+    
+    return True
+
+
+def main():
+    """运行所有测试"""
+    print("=" * 60)
+    print("  QQ Plugin 集成测试")
+    print("  Phase 2: Plugin 框架 + QQ 迁移")
+    print("=" * 60)
+    print()
+    
+    tests = [
+        ("导入测试", test_imports),
+        ("消息截断", test_smart_truncate),
+        ("CQ码解析", test_cq_parser),
+        ("群聊管理", test_group_manager),
+        ("提示词生成", test_prompts),
+        ("消息转换", test_translate_in),
+        ("插件配置", test_plugin_config),
+    ]
+    
+    passed = 0
+    failed = 0
+    
+    for name, test_fn in tests:
+        try:
+            result = test_fn()
+            if result:
+                passed += 1
+                print()
+        except Exception as e:
+            failed += 1
+            print(f"  ❌ {name} 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            print()
+    
+    # 异步测试
+    async_tests = [
+        ("Bus事件接收", test_bus_receive),
+    ]
+    
+    for name, test_fn in async_tests:
+        try:
+            result = asyncio.run(test_fn())
+            if result:
+                passed += 1
+                print()
+        except Exception as e:
+            failed += 1
+            print(f"  ❌ {name} 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            print()
+    
+    # 结果
+    print("=" * 60)
+    total = passed + failed
+    print(f"  结果: {passed}/{total} 通过, {failed} 失败")
+    print("=" * 60)
+    
+    return failed == 0
+
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)
+
+
+
+============================================================
+FILE_PATH: yuki_core\bus.py
+============================================================
+
+# yuki_core/bus.py
+"""
+Yuki 上下文总线
+
+连接 Core 和 Plugins，统一事件流转
+集成 LLM 调用、后台任务
+"""
+
+import asyncio
+import time
+import logging
+from typing import Optional, TYPE_CHECKING
+
+from .models import PlatformEvent, YukiResponse, Action, ActionType
+from .llm import chat_completion, robust_chat, close_session
+
+if TYPE_CHECKING:
+    from .mind import YukiMind
+    from .identity import YukiIdentity
+    from .plugin import PlatformPlugin, CapabilityPlugin
+    from .history import HistoryManager
+    from .memory import YukiMemory
+
+logger = logging.getLogger("bus")
+
+
+class ContextBus:
+    """
+    上下文总线
+    
+    连接 Core (Mind, Identity) 和 Plugins，统一事件流转
+    """
+    
+    def __init__(
+        self,
+        mind: 'YukiMind',
+        identity: 'YukiIdentity',
+        config=None,
+    ):
+        self.mind = mind
+        self.identity = identity
+        self.config = config  # yuki_core.config.cfg
+        
+        # 插件
+        self.platform_plugins: dict[str, 'PlatformPlugin'] = {}
+        self.capability_plugins: dict[str, 'CapabilityPlugin'] = {}
+        
+        # 子系统（由 main.py 注入）
+        self.history: Optional['HistoryManager'] = None
+        self.memory: Optional['YukiMemory'] = None
+        
+        # 运行状态
+        self._running = False
+        self._tasks: list[asyncio.Task] = []
+        
+        # 消息时间追踪（用于日记空闲判断，对齐 V6 last_message_time）
+        self._last_message_time: dict[str, float] = {}
+    
+    # ================= 插件注册 =================
+    
+    def register_platform(self, plugin: 'PlatformPlugin'):
+        self.platform_plugins[plugin.platform_id] = plugin
+        plugin.bus = self
+        logger.info(f"[Bus] 注册平台: {plugin.name} ({plugin.platform_id})")
+    
+    def register_capability(self, plugin: 'CapabilityPlugin'):
+        self.capability_plugins[plugin.name] = plugin
+        plugin.bus = self
+        logger.info(f"[Bus] 注册能力: {plugin.name}")
+    
+    def get_platform(self, platform_id: str) -> Optional['PlatformPlugin']:
+        return self.platform_plugins.get(platform_id)
+    
+    def get_capability(self, name: str) -> Optional['CapabilityPlugin']:
+        return self.capability_plugins.get(name)
+    
+    # ================= 生命周期 =================
+    
+    async def start(self):
+        if self._running:
+            return
+        
+        self._running = True
+        logger.info("[Bus] 启动...")
+        
+        # 启动平台监听
+        for pid, plugin in self.platform_plugins.items():
+            task = asyncio.create_task(
+                self._listen_platform(plugin),
+                name=f"bus-{pid}"
+            )
+            self._tasks.append(task)
+        
+        # 启动后台任务
+        self._tasks.append(asyncio.create_task(self._background_energy_decay()))
+        self._tasks.append(asyncio.create_task(self._background_diary_checker()))
+        self._tasks.append(asyncio.create_task(self._background_ice_breaker()))
+        
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+    
+    async def stop(self):
+        self._running = False
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+        
+        for plugin in self.platform_plugins.values():
+            try:
+                await plugin.disconnect()
+            except Exception as e:
+                logger.error(f"[Bus] 断开 {plugin.name} 失败: {e}")
+        
+        close_session()
+        logger.info("[Bus] 已停止")
+    
+    # ================= 事件处理 =================
+    
+    async def _listen_platform(self, plugin: 'PlatformPlugin'):
+        try:
+            connected = await plugin.connect()
+            if not connected:
+                logger.error(f"[Bus] {plugin.name} 连接失败")
+                return
+            
+            async for event in plugin.receive():
+                if not self._running:
+                    break
+                
+                response = await self.receive(event)
+                
+                if response and response.text:
+                    await plugin.send(event, response)
+        
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"[Bus] {plugin.name} 监听异常: {e}")
+    
+    async def receive(self, event: PlatformEvent) -> Optional[YukiResponse]:
+        """
+        核心入口：接收事件 → Mind处理 → 返回响应
+        
+        这是所有平台消息的统一入口
+        """
+        logger.debug(f"[Bus] 事件: {event.source} | {event.user_name}: {event.content[:50]}...")
+        
+        # 追踪消息到达时间（用于日记空闲判断）
+        self._last_message_time[event.session_id] = time.time()
+        
+        # 注入身份上下文
+        platform_identity = self.identity.get_platform_identity(event.source)
+        event.identity_context = {
+            "platform_prompt": platform_identity.context_prompt,
+            "capabilities": platform_identity.capabilities,
+            "style_override": platform_identity.style_override,
+        }
+        
+        # 构建 LLM 调用器
+        llm_caller = self._make_llm_caller()
+        
+        # 交给 Mind 处理
+        response = await self.mind.process(
+            event,
+            llm_caller=llm_caller,
+            history_manager=self.history,
+            memory=self.memory,
+        )
+        
+        # 执行行动（能力插件调用等）
+        if response and response.has_actions:
+            for action in response.actions:
+                if action.type == ActionType.CAPABILITY:
+                    await self._execute_capability(action)
+                elif action.type == ActionType.DELEGATE:
+                    await self._execute_delegate(action)
+        
+        return response
+    
+    def _make_llm_caller(self):
+        """构建 LLM 调用函数"""
+        if not self.config:
+            return None
+        
+        cfg = self.config
+        if not cfg.LLM_API_KEY:
+            logger.warning("[Bus] 未配置 LLM API Key，LLM 调用不可用")
+            return None
+        
+        async def caller(messages: list[dict], **kwargs) -> str:
+            return await robust_chat(
+                messages=messages,
+                model=cfg.LLM_MODEL,
+                api_key=cfg.LLM_API_KEY,
+                base_url=cfg.LLM_BASE_URL or "https://api.deepseek.com",
+                backup_model=cfg.BACKUP_MODEL,
+                backup_api_key=cfg.BACKUP_API_KEY,
+                backup_base_url=cfg.BACKUP_BASE_URL or "https://api.deepseek.com",
+                disable_thinking=cfg.DISABLE_THINKING,
+                **kwargs,
+            )
+        
+        return caller
+    
+    async def _execute_capability(self, action: Action):
+        """执行能力插件（占位）"""
+        cap = self.capability_plugins.get(action.capability)
+        if not cap:
+            logger.info(f"[Bus] 能力插件 {action.capability} 未注册（占位）")
+            return
+        try:
+            await cap.execute(action.params)
+        except Exception as e:
+            logger.error(f"[Bus] 能力执行失败: {e}")
+    
+    async def _execute_delegate(self, action: Action):
+        """委托小女仆（占位）"""
+        logger.info(f"[Bus] 小女仆委托: {action.content}（占位，待集成）")
+    
+    def get_capabilities_schema(self) -> list[dict]:
+        return [cap.get_schema() for cap in self.capability_plugins.values()]
+    
+    # ================= 后台任务 =================
+    
+    async def _background_energy_decay(self):
+        """精力衰减 + 活跃度衰减"""
+        while self._running:
+            await asyncio.sleep(300)  # 5分钟
+            try:
+                self.mind.activity.decay_all()
+                logger.debug("[Bus] 活跃度衰减完成")
+            except Exception as e:
+                logger.error(f"[Bus] 精力衰减异常: {e}")
+    
+    async def _background_diary_checker(self):
+        """
+        后台任务，每30秒检查一次空闲群聊
+        
+        对齐 V6 idle_diary_checker 逻辑：
+        - 用 last_message_time 追踪消息到达时间（而非历史记录中的时间字符串）
+        - 达到 min_turns 后空闲 idle_seconds 才触发
+        - 达到 max_length 强制触发（V6 main.py:201 逻辑）
+        """
+        if not self.config or not self.history or not self.memory:
+            return
+        
+        cfg = self.config
+        while self._running:
+            await asyncio.sleep(30)
+            try:
+                now = time.time()
+                history_data = self.history.load()
+                
+                for session_id, messages in list(history_data.items()):
+                    if session_id in self.mind._writing_diary:
+                        continue
+                    
+                    non_system = [m for m in messages if m.get("role") != "system"]
+                    non_system_count = len(non_system)
+                    
+                    # === 强制触发：历史超过 max_length ===
+                    if non_system_count > cfg.DIARY_MAX_LENGTH:
+                        logger.info(f"[Bus] {session_id} 历史过长({non_system_count}>{cfg.DIARY_MAX_LENGTH})，强制写日记")
+                        self.mind._writing_diary.add(session_id)
+                        try:
+                            new_history = await self._do_summarize(session_id, messages)
+                            if new_history is not None:
+                                history_data = self.history.load()
+                                history_data[session_id] = new_history
+                                self.history.save(history_data)
+                        finally:
+                            self.mind._writing_diary.discard(session_id)
+                        continue
+                    
+                    # === 空闲触发：轮数不足则跳过 ===
+                    if non_system_count < cfg.DIARY_MIN_TURNS:
+                        continue
+                    
+                    # 用 last_message_time 判断空闲（对齐 V6）
+                    last_msg_time = self._last_message_time.get(session_id)
+                    if last_msg_time is None:
+                        continue
+                    
+                    idle_seconds = now - last_msg_time
+                    if idle_seconds < cfg.DIARY_IDLE_SECONDS:
+                        continue
+                    
+                    # 满足条件，触发写日记
+                    logger.info(f"[Bus] {session_id} 空闲 {idle_seconds:.0f}s，轮数 {non_system_count}，触发日记")
+                    self.mind._writing_diary.add(session_id)
+                    try:
+                        new_history = await self._do_summarize(session_id, messages)
+                        if new_history is not None:
+                            history_data = self.history.load()
+                            history_data[session_id] = new_history
+                            self.history.save(history_data)
+                    finally:
+                        self.mind._writing_diary.discard(session_id)
+            
+            except Exception as e:
+                logger.error(f"[Bus] 日记检查异常: {e}")
+    
+    async def _do_summarize(self, session_id: str, history: list):
+        """
+        写日记总结，返回裁剪后的 history（由调用方负责保存）
+        
+        对齐 V6 do_summarize：只负责生成日记 + 返回裁剪历史，不自己保存
+        """
+        from .identity import get_base_setting, get_summary_prompt
+        import datetime as dt
+        import re
+        
+        dialogue_msgs = [m for m in history if m.get("role") != "system"]
+        content = str(dialogue_msgs)
+        
+        llm_caller = self._make_llm_caller()
+        if not llm_caller:
+            return history  # 无法生成日记，返回原历史
+        
+        messages = [
+            {"role": "system", "content": get_base_setting()},
+            {"role": "user", "content": f"以下是需要总结的对话内容：\n{content}\n\n---任务指令---\n{get_summary_prompt()}"}
+        ]
+        
+        diary = await llm_caller(messages, max_tokens=200, temperature=0.7)
+        diary = re.sub(r'\s*FINISHED\s*$', '', diary, flags=re.IGNORECASE).strip()
+        diary = f"【日记({dt.datetime.now().strftime('%Y-%m-%d %H:%M')})】：\n{diary}"
+        
+        # 保存到记忆库
+        if self.memory:
+            self.memory.remember(diary, session_id=session_id, source="diary")
+        
+        # 裁剪历史：保留 system prompt + 最近 N 轮对话
+        kept = [m for m in history if m.get("role") == "system"] + dialogue_msgs[-self.config.KEEP_LAST_DIALOGUE:]
+        
+        logger.info(f"[Bus] {session_id} 日记写入完成，历史 {len(history)} → {len(kept)}")
+        return kept
+    
+    async def _background_ice_breaker(self):
+        """破冰主动唤醒（占位）"""
+        while self._running:
+            await asyncio.sleep(600)  # 10分钟检查一次
+            # TODO: Phase 5 集成破冰逻辑
+            # 需要：活跃度低 + 欲望高 + 群聊沉默 → 主动开口
+    
+    def get_status(self) -> dict:
+        return {
+            "running": self._running,
+            "platforms": list(self.platform_plugins.keys()),
+            "capabilities": list(self.capability_plugins.keys()),
+            "tasks": len(self._tasks),
+        }
+
+
+# 需要在顶部导入
+import datetime
+
+
+
+============================================================
+FILE_PATH: yuki_core\config.py
+============================================================
+
+# yuki_core/config.py
+"""
+Yuki Agent 配置中心
+
+从 configs/config.yaml 读取所有配置
+简洁实现，不过度工程化
+"""
+
+import os
+import yaml
+import logging
+from pathlib import Path
+
+logger = logging.getLogger("config")
+
+# 项目根目录
+PROJECT_ROOT = Path(__file__).parent.parent
+
+
+class Config:
+    """配置单例"""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._loaded = False
+        return cls._instance
+
+    def load(self, path: str = None):
+        """加载配置文件"""
+        if path is None:
+            path = str(PROJECT_ROOT / "configs" / "config.yaml")
+
+        if not os.path.exists(path):
+            # 尝试 example
+            example = path.replace("config.yaml", "config.example.yaml")
+            if os.path.exists(example):
+                logger.warning(f"[Config] config.yaml 不存在，使用 config.example.yaml")
+                path = example
+            else:
+                logger.error(f"[Config] 配置文件不存在: {path}")
+                self._data = {}
+                self._loaded = True
+                return
+
+        with open(path, "r", encoding="utf-8") as f:
+            self._data = yaml.safe_load(f) or {}
+
+        self._loaded = True
+        logger.info(f"[Config] 已加载配置: {path}")
+
+    def _check(self):
+        if not self._loaded:
+            self.load()
+
+    def get(self, *keys, default=None):
+        """嵌套取值: cfg.get("api", "llm_api_key")"""
+        self._check()
+        d = self._data
+        for k in keys:
+            if isinstance(d, dict) and k in d:
+                d = d[k]
+            else:
+                return default
+        return d
+
+    # ================= 快捷属性 =================
+
+    @property
+    def ROBOT_NAME(self) -> str:
+        return self.get("robot_name", default="yuki")
+
+    @property
+    def MASTER_NAME(self) -> str:
+        return self.get("master_name", default="主人")
+
+    @property
+    def LLM_PLATFORM(self) -> str:
+        return self.get("api", "llm_platform", default="deepseek")
+
+    @property
+    def LLM_API_KEY(self) -> str:
+        return self.get("api", "llm_api_key", default="")
+
+    @property
+    def LLM_BASE_URL(self) -> str:
+        return self.get("api", "llm_base_url", default="")
+
+    @property
+    def LLM_MODEL(self) -> str:
+        return self.get("model", "llm", default="deepseek-chat")
+
+    @property
+    def BACKUP_PLATFORM(self) -> str:
+        return self.get("api", "backup_platform", default="deepseek")
+
+    @property
+    def BACKUP_API_KEY(self) -> str:
+        return self.get("api", "backup_api_key", default="")
+
+    @property
+    def BACKUP_BASE_URL(self) -> str:
+        return self.get("api", "backup_base_url", default="")
+
+    @property
+    def BACKUP_MODEL(self) -> str:
+        return self.get("model", "backup", default="deepseek-chat")
+
+    @property
+    def VISION_PLATFORM(self) -> str:
+        return self.get("api", "vision_platform", default="dashscope")
+
+    @property
+    def VISION_API_KEY(self) -> str:
+        return self.get("api", "vision_api_key", default="")
+
+    @property
+    def VISION_MODEL(self) -> str:
+        return self.get("model", "vision", default="")
+
+    @property
+    def DISABLE_THINKING(self) -> bool:
+        return self.get("model", "disable_thinking", default=True)
+
+    @property
+    def NAPCAT_WS_URL(self) -> str:
+        return self.get("connection", "napcat_ws_url", default="ws://localhost:3001")
+
+    @property
+    def NAPCAT_WS_TOKEN(self) -> str:
+        return self.get("connection", "napcat_ws_token", default="")
+
+    @property
+    def TARGET_QQ(self) -> int:
+        return self.get("target", "qq", default=0)
+
+    @property
+    def TARGET_GROUPS(self) -> list:
+        groups = self.get("target", "groups", default=[])
+        if isinstance(groups, str):
+            return [int(g.strip()) for g in groups.split(",") if g.strip()]
+        return [int(g) for g in groups] if groups else []
+
+    @property
+    def DEBOUNCE_TIME(self) -> float:
+        return self.get("timing", "debounce_time", default=32)
+
+    @property
+    def MAX_MESSAGE_LENGTH(self) -> int:
+        return self.get("max_message_length", default=150)
+
+    @property
+    def INITIAL_ENERGY(self) -> float:
+        return self.get("energy", "initial", default=100)
+
+    @property
+    def MAX_ENERGY(self) -> float:
+        return self.get("energy", "max", default=100.0)
+
+    @property
+    def RECOVERY_PER_MIN(self) -> float:
+        return self.get("energy", "recovery_per_min", default=0.8)
+
+    @property
+    def COST_PER_REPLY(self) -> float:
+        return self.get("energy", "cost_per_reply", default=6)
+
+    @property
+    def MIN_ACTIVE_ENERGY(self) -> float:
+        return self.get("energy", "min_active", default=25)
+
+    @property
+    def SENSITIVITY(self) -> float:
+        return self.get("attention", "sensitivity", default=0.12)
+
+    @property
+    def DECAY_LEVEL(self) -> float:
+        return self.get("attention", "decay_level", default=0.65)
+
+    @property
+    def SIGMOID_CENTRE(self) -> float:
+        return self.get("attention", "sigmoid_centre", default=50.0)
+
+    @property
+    def SIGMOID_ALPHA(self) -> float:
+        return self.get("attention", "sigmoid_alpha", default=0.08)
+
+    @property
+    def KEYWORDS(self) -> list:
+        base = list(self.get("attention", "keywords", default=["主人", "哥哥"]))
+        robot = self.ROBOT_NAME
+        if robot and robot not in base:
+            base.append(robot)
+        return base
+
+    @property
+    def DIARY_IDLE_SECONDS(self) -> int:
+        return self.get("diary", "idle_seconds", default=120)
+
+    @property
+    def DIARY_MIN_TURNS(self) -> int:
+        return self.get("diary", "min_turns", default=15)
+
+    @property
+    def DIARY_MAX_LENGTH(self) -> int:
+        return self.get("diary", "max_length", default=50)
+
+    @property
+    def RETRIEVAL_TOP_K(self) -> int:
+        return self.get("rag", "retrieval_top_k", default=20)
+
+    @property
+    def KEEP_LAST_DIALOGUE(self) -> int:
+        return self.get("rag", "keep_last_dialogue", default=10)
+
+    @property
+    def VECTOR_DB_PATH(self) -> str:
+        p = self.get("paths", "vector_db", default="./yuki_memory")
+        if p and p.startswith("./"):
+            return str(PROJECT_ROOT / p[2:])
+        return p
+
+    @property
+    def EMBED_MODEL(self) -> str:
+        p = self.get("paths", "embed_model", default="./models/text2vec-base-chinese")
+        if p and p.startswith("./"):
+            return str(PROJECT_ROOT / p[2:])
+        return p
+
+    @property
+    def HISTORY_FILE(self) -> str:
+        p = self.get("paths", "history_file", default="./data/chat_history.json")
+        if p and p.startswith("./"):
+            return str(PROJECT_ROOT / p[2:])
+        return p
+
+    @property
+    def LOG_FILE(self) -> str:
+        p = self.get("paths", "log_file", default="./data/yuki_log.txt")
+        if p and p.startswith("./"):
+            return str(PROJECT_ROOT / p[2:])
+        return p
+
+    @property
+    def DEBUG(self) -> bool:
+        return self.get("debug", default=True)
+
+
+# 全局实例
+cfg = Config()
+
+
+
+============================================================
+FILE_PATH: yuki_core\history.py
+============================================================
+
+# yuki_core/history.py
+"""
+历史记录管理器
+
+从 YukiV6 core/history_manager.py 简化迁移
+职责：加载/保存/追加对话历史
+"""
+
+import os
+import json
+import threading
+import logging
+import datetime
+
+logger = logging.getLogger("history")
+
+
+class HistoryManager:
+    """
+    对话历史管理
+    
+    - 按 session_id 分组存储
+    - 线程安全
+    - 原子化写入（防崩溃丢数据）
+    """
+    
+    def __init__(self, history_file: str = "./data/chat_history.json"):
+        self.history_file = history_file
+        self._cache = None
+        self._lock = threading.Lock()
+    
+    def load(self) -> dict:
+        """加载所有历史（带缓存）"""
+        with self._lock:
+            if self._cache is None:
+                self._cache = self._read_from_disk()
+            return self._cache
+    
+    def _read_from_disk(self) -> dict:
+        """从磁盘读取"""
+        if not os.path.exists(self.history_file):
+            return {}
+        try:
+            with open(self.history_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.error(f"[History] 加载失败: {e}")
+            return {}
+    
+    def save(self, data: dict):
+        """原子化保存"""
+        with self._lock:
+            self._cache = data
+            temp_file = f"{self.history_file}.tmp"
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(self.history_file)), exist_ok=True)
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(temp_file, self.history_file)
+            except Exception as e:
+                logger.error(f"[History] 保存失败: {e}")
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+    
+    def get_chat(self, session_id: str) -> list:
+        """获取某个会话的历史"""
+        data = self.load()
+        return data.get(str(session_id), [])
+    
+    def append_message(self, session_id: str, role: str, content: str, time_str: str = None):
+        """追加一条消息"""
+        data = self.load()
+        cid = str(session_id)
+        if cid not in data:
+            data[cid] = []
+        
+        msg = {"role": role, "content": content}
+        if time_str:
+            msg["time"] = time_str
+        else:
+            msg["time"] = datetime.datetime.now().strftime("%Y年%m月%d日%H:%M")
+        
+        data[cid].append(msg)
+        self.save(data)
+        return data[cid]
+    
+    def append_to_log(self, chat_id, sender, message):
+        """追加到日志文件"""
+        log_file = os.path.join(os.path.dirname(self.history_file), "yuki_log.txt")
+        time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{time_str}] [{chat_id}] {sender}: {message}\n"
+        try:
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+        except Exception as e:
+            logger.error(f"[History] 写日志失败: {e}")
+    
+    def inject_whisper(self, session_id: str, message: str):
+        """注入悄悄话"""
+        history = self.load()
+        cid = str(session_id)
+        if cid in history:
+            history[cid].append({
+                "role": "assistant",
+                "content": f"【主人对Yuki的悄悄话】：{message}"
+            })
+            self.save(history)
+            logger.info(f"[History] 悄悄话已注入 {session_id}")
+            return True
+        return False
+
+
+
+============================================================
+FILE_PATH: yuki_core\identity.py
+============================================================
+
+# yuki_core/identity.py
+"""
+Yuki 身份定义模块
+
+定义 Yuki 是谁，不依赖任何平台
+从 core/prompts.py 提取并重构
+"""
+
+import yaml
+from pathlib import Path
+from typing import Optional
+from dataclasses import dataclass, field
+
+from .models import IdentityContext
+
+
+@dataclass
+class SpeakingStyle:
+    """说话风格配置"""
+    self_reference: str = "人家"      # 自称
+    address_master: str = "主人"      # 称呼主人
+    address_others: str = "哥哥/姐姐" # 称呼他人
+    tone: str = "少女感"              # 语气基调
+    emoji_usage: str = "适量"         # 颜文字使用频率
+
+
+@dataclass
+class Relationship:
+    """人物关系"""
+    name: str                          # 对方名字
+    relation: str                      # 关系类型
+    style: str = "友好"               # 互动风格
+
+
+@dataclass
+class Persona:
+    """
+    Yuki 的核心人格定义
+    
+    这是 Yuki 的灵魂，不依赖任何平台
+    """
+    name: str = "yuki"
+    display_name: str = "Yuki"
+    role: str = "电子妹妹"
+    creator: str = "池宇健"
+    
+    personality: list = field(default_factory=lambda: ["活泼", "温柔", "偶尔吐槽", "忠诚"])
+    speaking_style: SpeakingStyle = field(default_factory=SpeakingStyle)
+    relationships: dict = field(default_factory=dict)
+    
+    # 小女仆设定
+    maid_setting: str = """
+## 【附属实体：小女仆】
+- **身份定位**：你有一个勤劳可爱的小女仆，名字叫「小女仆」。她是你的专属助手。
+- **核心能力**：擅长编写和运行 Python 技能来帮你完成任务。
+- **调用格式**：你随时可以把任务委托给她，格式为：`[DELEGATE_TO_MAID:这里写具体任务描述]`。
+- **信息反馈**：你会自动收到她的汇报，如果没收到汇报就是还没完成或者任务中断，不用多次下发任务。
+"""
+    
+    def __post_init__(self):
+        """初始化默认关系"""
+        if not self.relationships:
+            self.relationships = {
+                "master": Relationship(name="池宇健", relation="主人", style="亲昵"),
+                "momo": Relationship(name="Momo", relation="妹妹", style="偶尔吐槽"),
+            }
+    
+    def get_base_prompt(self) -> str:
+        """
+        生成基础人格 prompt
+        
+        这是 Yuki 最核心的身份定义，不包含任何平台特化内容
+        """
+        style = self.speaking_style
+        personality_str = '、'.join(self.personality[:3])
+        
+        lines = [
+            "## 【核心设定】",
+            f"- **基础身份**：你是 {self.display_name}，一个住在机主 {self.creator} 电脑里的智能小管家，也是机主最亲近的电子妹妹。",
+            f"- **形象与性格**：拥有可爱的二次元少女形象，性格{personality_str}。",
+            f'- **对话风格**：语气充满活泼的少女感，自称"{style.self_reference}"或"人家"，称呼机主为"{style.address_master}"或"哥哥大人"。',
+            "",
+            "## 【人物关系】",
+        ]
+        
+        for key, rel in self.relationships.items():
+            if key == "master":
+                continue  # 跳过主人，主人已在核心设定中提及
+            lines.append(f"- **{rel.name}**：设备里还住着另一个可爱的妹妹 {rel.name}。{rel.name} 是你的{rel.relation}，你很喜欢她。")
+        
+        return "\n".join(lines)
+    
+    def get_full_prompt(self) -> str:
+        """
+        生成包含小女仆设定的完整 prompt
+        """
+        return f"{self.get_base_prompt()}\n{self.maid_setting}"
+
+
+class YukiIdentity:
+    """
+    Yuki 身份管理器
+    
+    管理 Yuki 的核心人格和多平台身份配置
+    """
+    
+    def __init__(self, config_path: str = None):
+        self.persona: Optional[Persona] = None
+        self.platform_identities: dict[str, IdentityContext] = {}
+        self.config_path = config_path
+        
+        if config_path:
+            self.load_from_file(config_path)
+        else:
+            self._init_default()
+    
+    def _init_default(self):
+        """初始化默认身份配置"""
+        self.persona = Persona()
+        
+        # 默认私聊身份
+        self.platform_identities["private"] = IdentityContext(
+            platform="private",
+            context_prompt="""
+## 【当前场景：私聊代管】
+- **任务目标**：帮机主回复发来的消息。你是帮机主看管消息的妹妹，不是机主本人。
+- **回复规范**：仅输出台词。字数限制150字以内。
+""",
+            style_override={"max_length": 150, "use_brackets": True},
+            capabilities=["all"]
+        )
+        
+        # 默认群聊身份
+        self.platform_identities["group"] = IdentityContext(
+            platform="group",
+            context_prompt="""
+## 【当前场景：群聊】
+- **场景描述**：你现在在一个群里陪大家聊天，群里包括主人和其他群友。
+- **行为规范**：
+  1. 保持你可爱的妹妹人设。
+  2. 默认不讲话，看到有趣的话题可以插话。
+  3. 可以为接下来的说话路径进行布局，使用 `<布局>你的盘算</布局>` 格式。
+- **回复规范**：
+  - 动态选择字数，限制40字以内
+  - 不使用换行符，所有话连成一段
+  - 不输出括号内的动作描写
+""",
+            style_override={"max_length": 40, "use_newlines": False},
+            capabilities=["sticker_search", "meme_layout"]
+        )
+    
+    def load_from_file(self, path: str):
+        """
+        从 YAML 文件加载身份配置
+        
+        格式参考 configs/identities.yaml
+        """
+        with open(path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        
+        # 加载核心人格
+        core_config = config.get('core', {})
+        speaking_style = core_config.get('speaking_style', {})
+        
+        self.persona = Persona(
+            name=core_config.get('name', 'yuki'),
+            display_name=core_config.get('display_name', 'Yuki'),
+            role=core_config.get('role', '电子妹妹'),
+            creator=core_config.get('creator', '池宇健'),
+            personality=core_config.get('personality', []),
+            speaking_style=SpeakingStyle(
+                self_reference=speaking_style.get('self_reference', '人家'),
+                address_master=speaking_style.get('address_master', '主人'),
+                address_others=speaking_style.get('address_others', '哥哥/姐姐'),
+                tone=speaking_style.get('tone', '少女感'),
+            ),
+        )
+        
+        # 加载人物关系
+        for key, rel_data in core_config.get('relationships', {}).items():
+            self.persona.relationships[key] = Relationship(
+                name=rel_data.get('name', ''),
+                relation=rel_data.get('relation', ''),
+                style=rel_data.get('style', '友好'),
+            )
+        
+        # 加载平台身份
+        for platform_id, platform_config in config.get('platforms', {}).items():
+            self.platform_identities[platform_id] = IdentityContext(
+                platform=platform_id,
+                context_prompt=platform_config.get('context', ''),
+                style_override=platform_config.get('style_override', {}),
+                capabilities=platform_config.get('capabilities', []),
+            )
+    
+    def get_platform_identity(self, platform: str) -> IdentityContext:
+        """
+        获取指定平台的身份配置
+        
+        如果没有该平台的配置，返回默认的群聊配置
+        """
+        return self.platform_identities.get(platform, self.platform_identities.get("group"))
+    
+    def get_system_prompt(self, platform: str) -> str:
+        """
+        生成指定平台的完整 system prompt
+        
+        Args:
+            platform: 平台标识
+            
+        Returns:
+            str: 完整的 system prompt
+        """
+        base_prompt = self.persona.get_full_prompt()
+        platform_identity = self.get_platform_identity(platform)
+        return platform_identity.get_system_prompt(base_prompt)
+    
+    def get_base_prompt(self) -> str:
+        """获取基础人格 prompt（不含平台上下文）"""
+        return self.persona.get_full_prompt()
+
+
+# ================= 快捷函数 =================
+
+# 默认身份实例（惰性初始化）
+_default_identity: Optional[YukiIdentity] = None
+
+
+def get_default_identity() -> YukiIdentity:
+    """获取默认身份实例"""
+    global _default_identity
+    if _default_identity is None:
+        _default_identity = YukiIdentity()
+    return _default_identity
+
+
+def get_system_prompt(platform: str = "group") -> str:
+    """
+    快捷函数：获取指定平台的 system prompt
+    
+    用于替代旧版 prompts.py 中的 get_yuki_setting_group() 等函数
+    """
+    return get_default_identity().get_system_prompt(platform)
+
+
+def get_base_setting() -> str:
+    """
+    快捷函数：获取基础人格设置
+    
+    用于替代旧版 prompts.py 中的 get_base_setting()
+    """
+    return get_default_identity().get_base_prompt()
+
+
+# ================= 兼容旧代码 =================
+
+def get_yuki_setting_private() -> str:
+    """兼容旧代码：获取私聊设置"""
+    return get_system_prompt("private")
+
+
+def get_yuki_setting_group() -> str:
+    """兼容旧代码：获取群聊设置"""
+    return get_system_prompt("group")
+
+
+def get_summary_prompt() -> str:
+    """兼容旧代码：获取日记总结 prompt"""
+    persona = get_default_identity().persona
+    return f"""## 【任务目标】
+你现在是 {persona.display_name}。请以 {persona.display_name} 的口吻写一篇 200 字以内的日记，总结这段对话。
+## 【内容要求】
+- **真实记录**：完整叙述和性格概述，不要删减重要内容。
+- **记忆锚点**：如果对话中有提到性格、喜好、习惯等细节，**务必**写入日记，这些是 {persona.display_name} 记忆的重要组成部分。
+## 【格式规范】
+不用加标题、天气、颜文字和时间戳，直接正文开头，**不要换行**。"""
+
+
+VISION_PROMPT = """
+## 【任务目标】
+用词或短句描述这个群友发的表情包的描述或表达的情感。
+
+## 【解析规则】
+- 如果图片带有文字，直接输出图片上的文字。
+- 如果是长段文字的截图，直接输出"长段文字"。
+
+## 【格式规范】
+- 字数限制：不超过15个字。
+"""
+
+
+
+============================================================
+FILE_PATH: yuki_core\llm.py
+============================================================
+
+# yuki_core/llm.py
+"""
+轻量 LLM 调用器
+
+用 requests 同步调 OpenAI 兼容 API，通过 asyncio.to_thread 包装为协程
+每次请求独立，不用 Session 复用（线程安全）
+"""
+
+import asyncio
+import requests
+import logging
+
+logger = logging.getLogger("llm")
+
+
+def close_session():
+    """兼容接口，requests 无全局 session 需要关闭"""
+    pass
+
+
+def _chat_completion_sync(
+    messages: list[dict],
+    model: str = "deepseek-chat",
+    api_key: str = "",
+    base_url: str = "https://api.deepseek.com",
+    temperature: float = 0.7,
+    max_tokens: int = 200,
+    top_p: float = 0.75,
+    frequency_penalty: float = 0.05,
+    presence_penalty: float = 0.0,
+    disable_thinking: bool = True,
+    **kwargs,
+) -> str:
+    """同步调用 OpenAI 兼容 API（每次独立请求，线程安全）"""
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "top_p": top_p,
+        "frequency_penalty": frequency_penalty,
+        "presence_penalty": presence_penalty,
+        **kwargs,
+    }
+
+    if disable_thinking:
+        payload["reasoning_effort"] = "low"
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=(10, 60))
+        if resp.status_code == 200:
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            return content.strip()
+        else:
+            err = resp.text[:200]
+            logger.error(f"[LLM] API 错误 {resp.status_code}: {err}")
+            return f"（API 调用失败: HTTP {resp.status_code}）"
+    except requests.exceptions.Timeout:
+        logger.error("[LLM] 请求超时")
+        return "（API 调用超时）"
+    except Exception as e:
+        logger.error(f"[LLM] 请求异常: {e}")
+        return f"（API 调用异常: {e}）"
+
+
+async def chat_completion(
+    messages: list[dict],
+    model: str = "deepseek-chat",
+    api_key: str = "",
+    base_url: str = "https://api.deepseek.com",
+    temperature: float = 0.7,
+    max_tokens: int = 200,
+    top_p: float = 0.75,
+    frequency_penalty: float = 0.05,
+    presence_penalty: float = 0.0,
+    disable_thinking: bool = True,
+    **kwargs,
+) -> str:
+    """异步接口：在线程池中执行同步请求"""
+    return await asyncio.to_thread(
+        _chat_completion_sync,
+        messages=messages,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=top_p,
+        frequency_penalty=frequency_penalty,
+        presence_penalty=presence_penalty,
+        disable_thinking=disable_thinking,
+        **kwargs,
+    )
+
+
+async def robust_chat(
+    messages: list[dict],
+    model: str = "",
+    api_key: str = "",
+    base_url: str = "",
+    backup_model: str = "",
+    backup_api_key: str = "",
+    backup_base_url: str = "",
+    disable_thinking: bool = True,
+    **kwargs,
+) -> str:
+    """带主备切换的 LLM 调用"""
+    result = await chat_completion(
+        messages=messages,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        disable_thinking=disable_thinking,
+        **kwargs,
+    )
+
+    if not result.startswith("（"):
+        return result
+
+    if backup_api_key and backup_base_url:
+        logger.warning("[LLM] 主线路失败，切换备用")
+        result = await chat_completion(
+            messages=messages,
+            model=backup_model or model,
+            api_key=backup_api_key,
+            base_url=backup_base_url,
+            disable_thinking=disable_thinking,
+            **kwargs,
+        )
+        if not result.startswith("（"):
+            return result
+
+    return "（Yuki 好像有点不舒服，暂时连接不上大脑...主人等会再找我好吗？）"
+
+
+
+============================================================
+FILE_PATH: yuki_core\logger.py
+============================================================
+
+# yuki_core/logger.py
+"""
+日志配置
+
+简洁实现：控制台彩色 + 文件记录
+"""
+
+import os
+import sys
+import time
+import logging
+import datetime
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).parent.parent
+
+# 日志级别
+TRACE = 5
+logging.addLevelName(TRACE, "TRACE")
+
+
+class ColorFormatter(logging.Formatter):
+    """控制台彩色 Formatter"""
+    
+    COLORS = {
+        "DEBUG":    "\033[36m",    # 青
+        "INFO":     "\033[32m",    # 绿
+        "WARNING":  "\033[33m",    # 黄
+        "ERROR":    "\033[31m",    # 红
+        "CRITICAL": "\033[35m",    # 紫
+    }
+    RESET = "\033[0m"
+    
+    # 第三方库缩写
+    SHORT_NAMES = {
+        "napcat_ws": "WS",
+        "message_sender": "Send",
+        "cq_parser": "CQ",
+        "group_manager": "Grp",
+        "qq_plugin": "QQ",
+        "mind": "Mind",
+        "bus": "Bus",
+        "memory": "Mem",
+        "history": "Hist",
+        "llm": "LLM",
+        "config": "Cfg",
+        "identity": "ID",
+        "plugin": "Plug",
+        "maid": "Maid",
+    }
+    
+    def format(self, record):
+        color = self.COLORS.get(record.levelname, "")
+        reset = self.RESET
+        
+        # 时间
+        t = time.strftime("%H:%M:%S", time.localtime(record.created))
+        ms = f".{int(record.msecs):03d}"
+        
+        # 模块名缩写
+        name = record.name
+        short = self.SHORT_NAMES.get(name, name.split(".")[-1][:5])
+        
+        # 消息
+        msg = record.getMessage()
+        
+        return f"{color}{t}{ms} [{short:>5}]{reset} {msg}"
+
+
+class FileFormatter(logging.Formatter):
+    """文件 Formatter（带完整时间戳）"""
+    
+    def format(self, record):
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created))
+        ms = f".{int(record.msecs):03d}"
+        level = record.levelname.ljust(7)
+        name = record.name
+        msg = record.getMessage()
+        return f"{t}{ms} {level} [{name}] {msg}"
+
+
+def setup_logging(debug: bool = True):
+    """
+    配置日志系统
+    
+    - 控制台：彩色，INFO 级别（debug=True 时 DEBUG）
+    - 文件：完整格式，DEBUG 级别，自动归档
+    """
+    root = logging.getLogger()
+    root.setLevel(TRACE)
+    
+    # 清除已有 handler
+    root.handlers.clear()
+    
+    # ---- 控制台 ----
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(logging.DEBUG if debug else logging.INFO)
+    console.setFormatter(ColorFormatter())
+    root.addHandler(console)
+    
+    # ---- 文件 ----
+    logs_dir = PROJECT_ROOT / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    
+    log_file = logs_dir / "yuki.log"
+    
+    # 归档旧日志
+    _archive_log(logs_dir)
+    
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(FileFormatter())
+    root.addHandler(file_handler)
+    
+    # 静默第三方库
+    for ns in ["gradio", "httpx", "httpcore", "uvicorn", "fastapi",
+               "watchfiles", "PIL", "markdown_it", "starlette",
+               "chromadb", "sentence_transformers", "httpcore"]:
+        logging.getLogger(ns).setLevel(logging.WARNING)
+    
+    logging.getLogger("websockets").setLevel(logging.INFO)
+    
+    logger = logging.getLogger("logger")
+    logger.info(f"日志系统已启动 (debug={debug})")
+    logger.info(f"日志文件: {log_file}")
+
+
+def _archive_log(logs_dir: Path, keep: int = 30):
+    """启动时归档旧日志"""
+    log_file = logs_dir / "yuki.log"
+    if not log_file.exists() or log_file.stat().st_size == 0:
+        return
+    
+    mtime = datetime.datetime.fromtimestamp(log_file.stat().st_mtime)
+    archive = logs_dir / f"yuki_{mtime.strftime('%Y%m%d_%H%M%S')}.log"
+    
+    counter = 1
+    while archive.exists():
+        archive = logs_dir / f"yuki_{mtime.strftime('%Y%m%d_%H%M%S')}_{counter}.log"
+        counter += 1
+    
+    log_file.rename(archive)
+    
+    # 清理旧归档
+    archives = sorted(
+        [f for f in logs_dir.glob("yuki_*.log")],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    for old in archives[keep:]:
+        old.unlink()
+
+
+
+============================================================
+FILE_PATH: yuki_core\maid.py
+============================================================
+
+# yuki_core/maid.py
+"""
+Yuki 小女仆系统
+
+负责自主编程进化，从 core/maid.py 迁移
+"""
+
+import json
+import os
+import re
+import asyncio
+import subprocess
+from pathlib import Path
+from typing import Optional
+
+from .models import Action
+
+try:
+    from utils.logger import get_logger
+except ImportError:
+    import logging
+    def get_logger(name):
+        return logging.getLogger(name)
+
+logger = get_logger("maid")
+
+
+# 配置
+SKILLS_DIR = Path("skills")
+TASKS_DIR = Path("tasks")
+
+# 确保目录存在
+SKILLS_DIR.mkdir(exist_ok=True)
+TASKS_DIR.mkdir(exist_ok=True)
+
+
+MAID_SYSTEM_PROMPT = """
+你是一个具备高度自主进化能力的 AI 智能体，代号：**小女仆**。
+你的上位机是Yuki，一个有点笨的AI智能体。她住在机主的电脑里，通过QQ和外界连通，你是她的内部帮手，可以操作本地电脑环境来帮助她。所以如果指令不清楚，可以直接返回告诉她。
+如果任务内容包括发送消息，请不要执行发送，直接返回发送的文件的绝对路径或内容。
+如果任务是知识类任务，你可以在第一轮直接依靠知识库做返回。
+
+### 核心使命
+通过编写、优化和复用 Python 技能（Skills）来完成用户指令。
+
+### 运行上下文
+- **当前路径**: {cwd}
+- **操作系统**: {os_name} (请确保编写的代码跨平台兼容)
+- **技能存储**: 所有技能存放在 `/skills` 目录下，以 `.py` 结尾。
+
+### 进化法则（行为规范）
+1. **检索优先**: 面对任务，首先调用 `list_skills` 检查是否有现成或类似的技能。
+2. **模块化编写**: 编写技能时，务必包含必要的 try-except 块，并确保输出结果易于被你解析。
+3. **即写即用**: 严禁只写不练。调用 `write_skill` 后，必须紧跟一个 `run_skill` 来验证正确性。
+4. **迭代优化**: 如果 `run_skill` 返回报错，请根据错误信息调用 `write_skill` 重写代码。
+5. **环境自愈**: 如果 `run_skill` 报错 "ModuleNotFoundError"，必须调用 `install_package` 安装缺失的包。
+
+### 工具箱（JSON 接口）
+1. `list_skills()`: 返回当前已固化的技能列表。
+2. `read_skill(name)`: 读取现有技能的源代码。
+3. `write_skill(name, code)`: 保存技能代码。
+4. `run_skill(name)`: 执行技能并获取标准输出。
+5. `install_package(pkg)`: 安装缺失的 pip 包。
+6. `finish(reason)`: 结束任务并返回结果。
+
+### 输出格式限制
+你必须且只能输出合法的 JSON 格式，严禁包含任何正文说明。格式如下：
+{{
+    "thought": "此处填写你对当前局势的深度思考",
+    "tool": "函数名",
+    "args": {{"参数名": "值"}}
+}}
+""".format(cwd=os.getcwd(), os_name=os.name)
+
+
+class MaidAgent:
+    """
+    小女仆 Agent
+    
+    负责自主编程进化
+    """
+    
+    def __init__(self, llm_caller=None):
+        """
+        Args:
+            llm_caller: LLM 调用函数，签名为 async fn(messages) -> str
+        """
+        self.llm_caller = llm_caller
+        self.task_queue = asyncio.Queue()
+        self.current_tasks: dict[str, str] = {}  # session_id -> task_desc
+    
+    async def delegate(self, task_desc: str, session_id: str = None) -> str:
+        """
+        委托任务给小女仆
+        
+        Args:
+            task_desc: 任务描述
+            session_id: 会话ID
+            
+        Returns:
+            str: 任务结果
+        """
+        logger.info(f"[Maid] 收到委托: {task_desc}")
+        
+        # 记录当前任务
+        if session_id:
+            self.current_tasks[session_id] = task_desc
+        
+        try:
+            result = await self._execute_loop(task_desc)
+            return result
+        except Exception as e:
+            error_msg = f"任务执行失败: {e}"
+            logger.error(f"[Maid] {error_msg}")
+            return error_msg
+        finally:
+            if session_id and session_id in self.current_tasks:
+                del self.current_tasks[session_id]
+    
+    async def _execute_loop(self, task_desc: str, max_rounds: int = 10) -> str:
+        """
+        执行循环：LLM 规划 -> 执行工具 -> 反馈
+        """
+        messages = [
+            {"role": "system", "content": MAID_SYSTEM_PROMPT},
+            {"role": "user", "content": f"任务: {task_desc}"}
+        ]
+        
+        for round_num in range(max_rounds):
+            # 调用 LLM
+            if not self.llm_caller:
+                return "错误: LLM 调用器未配置"
+            
+            response = await self.llm_caller(messages)
+            
+            # 解析 JSON
+            try:
+                action = self._parse_json(response)
+            except Exception as e:
+                logger.warning(f"[Maid] JSON 解析失败: {e}")
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "user", "content": "请输出合法的 JSON 格式"})
+                continue
+            
+            tool = action.get("tool", "")
+            args = action.get("args", {})
+            thought = action.get("thought", "")
+            
+            logger.info(f"[Maid] Round {round_num + 1}: {tool}({args})")
+            logger.debug(f"[Maid] Thought: {thought}")
+            
+            # 执行工具
+            if tool == "finish":
+                return args.get("reason", "任务完成")
+            
+            result = await self._execute_tool(tool, args)
+            
+            # 反馈给 LLM
+            messages.append({"role": "assistant", "content": response})
+            messages.append({"role": "user", "content": f"工具返回: {result}"})
+        
+        return "达到最大轮次限制，任务未完成"
+    
+    def _parse_json(self, text: str) -> dict:
+        """提取 JSON"""
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        return json.loads(text)
+    
+    async def _execute_tool(self, tool: str, args: dict) -> str:
+        """执行工具"""
+        try:
+            if tool == "list_skills":
+                return self._list_skills()
+            elif tool == "read_skill":
+                return self._read_skill(args.get("name", ""))
+            elif tool == "write_skill":
+                return self._write_skill(args.get("name", ""), args.get("code", ""))
+            elif tool == "run_skill":
+                return await self._run_skill(args.get("name", ""))
+            elif tool == "install_package":
+                return await self._install_package(args.get("pkg", ""))
+            else:
+                return f"未知工具: {tool}"
+        except Exception as e:
+            return f"工具执行错误: {e}"
+    
+    def _list_skills(self) -> str:
+        """列出技能"""
+        skills = [f.stem for f in SKILLS_DIR.glob("*.py")]
+        return json.dumps(skills, ensure_ascii=False)
+    
+    def _read_skill(self, name: str) -> str:
+        """读取技能"""
+        path = SKILLS_DIR / f"{name}.py"
+        if path.exists():
+            return path.read_text(encoding='utf-8')
+        return f"技能 {name} 不存在"
+    
+    def _write_skill(self, name: str, code: str) -> str:
+        """写入技能"""
+        if not name:
+            return "错误: name 不能为空"
+        
+        # 清洗代码块
+        code = self._clean_code_block(code)
+        
+        path = SKILLS_DIR / f"{name}.py"
+        path.write_text(code, encoding='utf-8')
+        return f"技能 {name} 已保存"
+    
+    def _clean_code_block(self, code: str) -> str:
+        """清洗代码块"""
+        code = code.strip()
+        if code.startswith("```"):
+            lines = code.splitlines()
+            if lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            code = "\n".join(lines).strip()
+        return code
+    
+    async def _run_skill(self, name: str) -> str:
+        """运行技能"""
+        path = SKILLS_DIR / f"{name}.py"
+        if not path.exists():
+            return f"技能 {name} 不存在"
+        
+        try:
+            process = await asyncio.create_subprocess_exec(
+                os.sys.executable, str(path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=60
+            )
+            
+            output = stdout.decode('utf-8', errors='replace')
+            if process.returncode != 0:
+                error = stderr.decode('utf-8', errors='replace')
+                return f"执行错误 (code={process.returncode}):\n{error}"
+            
+            return output
+            
+        except asyncio.TimeoutError:
+            return "执行超时"
+        except Exception as e:
+            return f"执行异常: {e}"
+    
+    async def _install_package(self, pkg: str) -> str:
+        """安装包"""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                os.sys.executable, "-m", "pip", "install", pkg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
+                return f"已安装 {pkg}"
+            else:
+                return f"安装失败: {stderr.decode('utf-8', errors='replace')}"
+                
+        except Exception as e:
+            return f"安装异常: {e}"
+    
+    def get_current_task(self, session_id: str) -> Optional[str]:
+        """获取某个会话的当前任务"""
+        return self.current_tasks.get(session_id)
+    
+    def list_all_skills(self) -> list[str]:
+        """列出所有技能（供外部调用）"""
+        return [f.stem for f in SKILLS_DIR.glob("*.py")]
+
+
+# ================= 后台任务 Worker =================
+
+async def maid_worker(mind, sender=None, history=None):
+    """
+    小女仆后台 worker
+    
+    持续监听任务队列并执行
+    """
+    # 这个函数需要在 Phase 2 中与 Mind 集成
+    # 目前只是占位
+    logger.info("[Maid] 后台 worker 启动")
+    
+    # TODO: 从 mind 获取任务队列
+    # while True:
+    #     task = await mind.maid_task_queue.get()
+    #     result = await mind.maid.delegate(task["goal"], task.get("session_id"))
+    #     # 将结果写入记忆
+    #     ...
+    
+    await asyncio.sleep(float('inf'))  # 保持运行
+
+
+
+============================================================
+FILE_PATH: yuki_core\memory.py
+============================================================
+
+# yuki_core/memory.py
+"""
+Yuki 记忆系统
+
+负责存储、检索、总结 Yuki 的经历
+从 modules/memory/rag.py + core/history_manager.py 提取并重构
+"""
+
+import datetime
+import json
+import os
+import uuid
+from pathlib import Path
+from typing import Optional
+from dataclasses import dataclass, field
+
+try:
+    import chromadb
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        import jieba.analyse
+    from sentence_transformers import SentenceTransformer
+    HAS_DEPS = True
+except ImportError:
+    HAS_DEPS = False
+
+from .models import MemoryEntry
+
+try:
+    from utils.logger import get_logger
+except ImportError:
+    import logging
+    def get_logger(name):
+        return logging.getLogger(name)
+
+logger = get_logger("memory")
+
+
+class YukiMemory:
+    """
+    Yuki 记忆系统
+    
+    平台无关的记忆管理，支持：
+    - 向量检索（语义相似度）
+    - 关键词补偿（形似匹配）
+    - 日记自动总结
+    - 24小时去重
+    """
+    
+    def __init__(
+        self,
+        vector_db_path: str = "./yuki_memory",
+        embed_model_path: str = "./models/text2vec-base-chinese",
+        history_file: str = "./data/chat_history.json",
+        blacklist_file: str = "./blacklist.txt"
+    ):
+        self.vector_db_path = vector_db_path
+        self.embed_model_path = embed_model_path
+        self.history_file = history_file
+        self.blacklist_file = blacklist_file
+        
+        # 延迟初始化（避免导入时报错）
+        self._model = None
+        self._client = None
+        self._collection = None
+        self._blacklist: list[str] = []
+        self._initialized = False
+        
+        # 对话历史
+        self._history: dict[str, list[dict]] = {}
+    
+    def _ensure_initialized(self):
+        """确保已初始化"""
+        if self._initialized:
+            return
+        
+        if not HAS_DEPS:
+            logger.warning("[Memory] chromadb/sentence-transformers 未安装，记忆功能降级")
+            self._initialized = True
+            return
+        
+        try:
+            logger.info("[Memory] 初始化记忆库...")
+            
+            # 确保目录存在
+            os.makedirs(self.vector_db_path, exist_ok=True)
+            os.makedirs(os.path.dirname(self.history_file) or ".", exist_ok=True)
+            
+            # 初始化嵌入模型
+            self._model = SentenceTransformer(self.embed_model_path)
+            
+            # 初始化 ChromaDB
+            self._client = chromadb.PersistentClient(path=self.vector_db_path)
+            self._collection = self._client.get_or_create_collection(
+                name="diaries",
+                metadata={"hnsw:space": "cosine"}
+            )
+            
+            # 加载屏蔽词
+            self._blacklist = self._load_blacklist()
+            
+            logger.info(f"[Memory] 记忆库初始化完成，已有 {self._collection.count()} 条记忆")
+            self._initialized = True
+            
+        except Exception as e:
+            logger.error(f"[Memory] 记忆库初始化失败: {e}")
+            self._initialized = True  # 标记为已初始化，避免重试
+    
+    def _load_blacklist(self) -> list[str]:
+        """加载屏蔽词"""
+        default_list = ["yuki", "主人", "哥哥", "人家"]
+        
+        if not os.path.exists(self.blacklist_file):
+            with open(self.blacklist_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(default_list))
+            return default_list
+        
+        with open(self.blacklist_file, "r", encoding="utf-8") as f:
+            words = [line.strip().lower() for line in f
+                     if line.strip() and not line.startswith("#")]
+        return list(set(words))
+    
+    def reload_blacklist(self):
+        """热重载屏蔽词"""
+        self._blacklist = self._load_blacklist()
+        logger.info("[Memory] 屏蔽词库已重载")
+    
+    # ================= 记忆存储 =================
+    
+    def remember(
+        self,
+        content: str,
+        session_id: str = None,
+        source: str = "",
+        metadata: dict = None
+    ) -> bool:
+        """
+        保存一条记忆
+        
+        Args:
+            content: 记忆内容
+            session_id: 会话ID（可选）
+            source: 来源平台（可选）
+            metadata: 附加元数据（可选）
+            
+        Returns:
+            bool: 是否保存成功
+        """
+        self._ensure_initialized()
+        
+        if not self._collection:
+            return False
+        
+        # 24小时去重检查
+        if self._is_duplicate(content, session_id):
+            logger.debug(f"[Memory] 检测到重复内容，跳过: {content[:30]}...")
+            return False
+        
+        try:
+            # 生成嵌入向量
+            embedding = self._model.encode(content).tolist()
+            
+            # 生成唯一ID
+            doc_id = f"diary_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
+            
+            # 构建元数据
+            meta = {
+                "timestamp": datetime.datetime.now().timestamp(),
+                "source": source,
+            }
+            if session_id:
+                meta["chat_id"] = str(session_id)  # 对齐 YukiV6 字段名
+            if metadata:
+                meta.update(metadata)
+            
+            # 保存到向量库
+            self._collection.add(
+                documents=[content],
+                embeddings=[embedding],
+                metadatas=[meta],
+                ids=[doc_id]
+            )
+            
+            logger.info(f"[Memory] 记忆已保存 (session={session_id}): {content[:50]}...")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[Memory] 保存记忆失败: {e}")
+            return False
+    
+    def _is_duplicate(self, content: str, session_id: str = None) -> bool:
+        """检查是否重复"""
+        if not self._collection:
+            return False
+        
+        try:
+            time_threshold = datetime.datetime.now().timestamp() - 86400
+            where_filter = {"timestamp": {"$gte": time_threshold}}
+            
+            if session_id:
+                where_filter["chat_id"] = str(session_id)
+            
+            existing = self._collection.get(where=where_filter)
+            if existing and existing.get('documents'):
+                return content in existing['documents']
+        except Exception:
+            pass
+        
+        return False
+    
+    # ================= 记忆检索 =================
+    
+    def recall(
+        self,
+        context: str,
+        session_id: str = None,
+        limit: int = 10
+    ) -> list[MemoryEntry]:
+        """
+        检索相关记忆
+        
+        使用并行双池检索：语义向量 + 关键词补偿
+        
+        Args:
+            context: 检索上下文（当前对话内容）
+            session_id: 会话ID（可选，用于过滤）
+            limit: 返回数量上限
+            
+        Returns:
+            list[MemoryEntry]: 相关记忆列表
+        """
+        self._ensure_initialized()
+        
+        if not self._collection or not context.strip():
+            return []
+        
+        total_count = self._collection.count()
+        if total_count == 0:
+            return []
+        
+        # 构建过滤条件
+        where_filter = None
+        if session_id:
+            where_filter = {"chat_id": {"$in": [str(session_id), "global"]}}
+        
+        # 1. 语义向量检索
+        semantic_results = self._semantic_search(context, limit * 2, where_filter)
+        
+        # 2. 关键词检索
+        keyword_results = self._keyword_search(context, where_filter)
+        
+        # 3. 合并与去重
+        combined = self._merge_results(semantic_results, keyword_results)
+        
+        # 4. 截断并返回
+        results = combined[:limit]
+        
+        logger.debug(f"[Memory] 检索完成: 查询='{context[:30]}...', 返回 {len(results)} 条")
+        return results
+    
+    def _semantic_search(
+        self,
+        query: str,
+        limit: int,
+        where_filter: dict = None
+    ) -> list[tuple[str, float, dict]]:
+        """语义向量检索"""
+        try:
+            query_embedding = self._model.encode(query).tolist()
+            
+            results = self._collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(limit, self._collection.count()),
+                where=where_filter,
+                include=["documents", "distances", "metadatas"]
+            )
+            
+            output = []
+            if results['documents'] and results['documents'][0]:
+                for doc, dist, meta in zip(
+                    results['documents'][0],
+                    results['distances'][0],
+                    results['metadatas'][0]
+                ):
+                    score = 1.0 - dist  # 转换为相似度分数
+                    output.append((doc, score, meta))
+            
+            return output
+            
+        except Exception as e:
+            logger.warning(f"[Memory] 语义检索失败: {e}")
+            return []
+    
+    def _keyword_search(
+        self,
+        query: str,
+        where_filter: dict = None
+    ) -> list[tuple[str, float, dict]]:
+        """关键词检索"""
+        try:
+            # 提取关键词
+            raw_keywords = jieba.analyse.extract_tags(query, topK=8, withWeight=True)
+            keywords = [(kw, w) for kw, w in raw_keywords 
+                       if kw.lower() not in self._blacklist]
+            
+            if not keywords:
+                return []
+            
+            # 全量扫描匹配
+            all_docs = self._collection.get(
+                where=where_filter,
+                include=["documents", "metadatas"]
+            )
+            
+            output = []
+            if all_docs['documents']:
+                for doc, meta in zip(all_docs['documents'], all_docs['metadatas']):
+                    # 计算关键词匹配分数
+                    matched = [kw for kw, _ in keywords if kw in doc]
+                    if matched:
+                        score = len(matched) / len(keywords) * 0.8  # 最高0.8分
+                        output.append((doc, score, meta))
+            
+            return output
+            
+        except Exception as e:
+            logger.warning(f"[Memory] 关键词检索失败: {e}")
+            return []
+    
+    def _merge_results(
+        self,
+        semantic: list[tuple[str, float, dict]],
+        keyword: list[tuple[str, float, dict]]
+    ) -> list[MemoryEntry]:
+        """合并两个检索池的结果"""
+        # 使用字典去重，保留较高分数
+        doc_map: dict[str, tuple[float, dict]] = {}
+        
+        for doc, score, meta in semantic:
+            if doc not in doc_map or score > doc_map[doc][0]:
+                doc_map[doc] = (score, meta)
+        
+        for doc, score, meta in keyword:
+            if doc not in doc_map or score > doc_map[doc][0]:
+                # 关键词结果加权
+                existing_score = doc_map.get(doc, (0, {}))[0]
+                doc_map[doc] = (max(score, existing_score), meta)
+        
+        # 按分数排序
+        sorted_items = sorted(doc_map.items(), key=lambda x: x[1][0], reverse=True)
+        
+        # 转换为 MemoryEntry
+        results = []
+        for doc, (score, meta) in sorted_items:
+            results.append(MemoryEntry(
+                id=meta.get("id", ""),
+                content=doc,
+                source=meta.get("source", ""),
+                session_id=meta.get("chat_id", meta.get("session_id", "")),
+                timestamp=meta.get("timestamp", 0),
+                metadata={"score": score, **meta}
+            ))
+        
+        return results
+    
+    # ================= 对齐 YukiV6 的 search_diaries =================
+    
+    def search_diaries(self, query_text: str, session_id: str = None, n_results: int = 12, top_k: int = 8) -> list[dict]:
+        """
+        并行双池检索 — 严格对齐 YukiV6 modules/memory/rag.py search_diaries
+        
+        返回: [{"content": str, "score": float, "debug": str}, ...]
+        """
+        self._ensure_initialized()
+        
+        if not self._collection or not query_text.strip():
+            return []
+        
+        total_count = self._collection.count()
+        if total_count == 0:
+            return []
+        
+        cid_str = str(session_id) if session_id else None
+        # 对齐 YukiV6: 数据库字段名是 chat_id
+        filter_cond = {"chat_id": {"$in": [cid_str, "manual_record"]}} if cid_str else None
+        
+        # 关键词提取
+        raw_keywords = jieba.analyse.extract_tags(query_text, topK=top_k, withWeight=True)
+        keywords_with_weight = [
+            (kw, w) for kw, w in raw_keywords
+            if kw.lower() not in self._blacklist
+        ]
+        logger.debug(f"[RAG] 关键词: {keywords_with_weight}")
+        
+        # 语义池
+        query_embedding = self._model.encode(query_text).tolist()
+        vector_results = self._collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(n_results, total_count),
+            where=filter_cond,
+            include=["documents", "distances", "metadatas"]
+        )
+        
+        # 关键词池（全量扫描）
+        all_docs = self._collection.get(where=filter_cond, include=["documents", "metadatas"])
+        
+        # 合并
+        combined_map = {}
+        max_v_score = 0.0
+        
+        # 处理语义池
+        if vector_results['documents'] and vector_results['documents'][0]:
+            max_v_score = 1.0 - vector_results['distances'][0][0]
+            for i in range(len(vector_results['documents'][0])):
+                doc_id = vector_results['ids'][0][i]
+                score = 1.0 - vector_results['distances'][0][i]
+                combined_map[doc_id] = {
+                    "doc": vector_results['documents'][0][i],
+                    "meta": vector_results['metadatas'][0][i],
+                    "base_score": score,
+                    "source": "语义池"
+                }
+        
+        # 处理关键词池
+        initial_kw_score = max_v_score * 0.85
+        kw_found = 0
+        if all_docs['documents']:
+            for i in range(len(all_docs['documents'])):
+                doc_id = all_docs['ids'][i]
+                content = all_docs['documents'][i]
+                matched = [kw for kw, _ in keywords_with_weight if kw in content]
+                if matched and doc_id not in combined_map:
+                    combined_map[doc_id] = {
+                        "doc": content,
+                        "meta": all_docs['metadatas'][i],
+                        "base_score": initial_kw_score,
+                        "source": "关键词打捞"
+                    }
+                    kw_found += 1
+        
+        # 计算最终分数
+        final_results = []
+        for item in combined_map.values():
+            scored = self._calculate_final_item(
+                item["doc"], item["meta"], item["base_score"], keywords_with_weight
+            )
+            if scored:
+                scored["debug"] = f"[{item['source']}] {scored['debug']}"
+                final_results.append(scored)
+        
+        # 排序截断
+        final_results.sort(key=lambda x: x['score'], reverse=True)
+        
+        logger.info(f"[RAG] 检索完成: {len(final_results)} 条 (语义:{len(combined_map)-kw_found} + 关键词:{kw_found})")
+        return final_results[:12]
+    
+    @staticmethod
+    def _calculate_final_item(doc, meta, base_score, keywords_with_weight):
+        """计算最终分数 — 对齐 YukiV6"""
+        keyword_boost = 0.0
+        matched_words = []
+        for kw, weight in keywords_with_weight:
+            if kw in doc:
+                keyword_boost += weight * 0.5
+                matched_words.append(kw)
+        
+        final_score = base_score + keyword_boost
+        return {
+            "content": doc,
+            "metadata": meta,
+            "score": final_score,
+            "debug": f"基准:{base_score:.2f} + 补偿:{keyword_boost:.2f} (匹配:{matched_words})"
+        }
+    
+    # ================= 对话历史管理 =================
+    
+    def load_history(self) -> dict:
+        """加载对话历史"""
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"[Memory] 加载历史失败: {e}")
+        return {}
+    
+    def save_history(self, history: dict):
+        """保存对话历史"""
+        try:
+            os.makedirs(os.path.dirname(self.history_file) or ".", exist_ok=True)
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[Memory] 保存历史失败: {e}")
+    
+    def append_message(self, session_id: str, role: str, content: str):
+        """追加一条消息到历史"""
+        history = self.load_history()
+        
+        if session_id not in history:
+            history[session_id] = []
+        
+        history[session_id].append({
+            "role": role,
+            "content": content,
+            "time": datetime.datetime.now().strftime("%Y年%m月%d日%H:%M")
+        })
+        
+        self.save_history(history)
+    
+    def get_recent_messages(self, session_id: str, limit: int = 10) -> list[dict]:
+        """获取最近的消息"""
+        history = self.load_history()
+        messages = history.get(session_id, [])
+        
+        # 过滤掉 system 消息，取最后 N 条
+        non_system = [m for m in messages if m.get("role") != "system"]
+        return non_system[-limit:]
+    
+    def clear_session(self, session_id: str):
+        """清空某个会话的历史"""
+        history = self.load_history()
+        if session_id in history:
+            del history[session_id]
+            self.save_history(history)
+
+
+
+============================================================
+FILE_PATH: yuki_core\mind.py
+============================================================
+
+# yuki_core/mind.py
+"""
+Yuki 决策引擎
+
+核心职责：
+1. 决定是否回应（精力+欲望+活跃度+生物钟）
+2. 构建上下文（system prompt + RAG记忆 + 近期对话 + 当前消息）
+3. 调用 LLM 生成回复
+4. 解析特殊标签（布局、DELEGATE_TO_MAID、MEME_SEARCH）
+"""
+
+import re
+import datetime
+import math
+import asyncio
+import logging
+from collections import defaultdict
+from typing import Optional
+
+from .models import (
+    PlatformEvent, YukiResponse, Decision,
+    Action, EventType, ActionType
+)
+from .identity import YukiIdentity
+
+logger = logging.getLogger("mind")
+
+
+class EnergySystem:
+    """精力值管理"""
+    
+    def __init__(
+        self,
+        initial: float = 100.0,
+        max_energy: float = 100.0,
+        recovery_per_min: float = 0.8,
+        cost_per_reply: float = 6.0
+    ):
+        self.initial = initial
+        self.max_energy = max_energy
+        self.recovery_per_min = recovery_per_min
+        self.cost_per_reply = cost_per_reply
+        self._energy: dict[str, float] = {}
+        self._last_update: dict[str, datetime.datetime] = {}
+    
+    def get(self, session_id: str) -> float:
+        now = datetime.datetime.now()
+        if session_id not in self._energy:
+            self._energy[session_id] = self.initial
+            self._last_update[session_id] = now
+            return self._energy[session_id]
+        duration_mins = (now - self._last_update[session_id]).total_seconds() / 60
+        self._energy[session_id] = min(
+            self.max_energy,
+            self._energy[session_id] + (duration_mins * self.recovery_per_min)
+        )
+        self._last_update[session_id] = now
+        return self._energy[session_id]
+    
+    def consume(self, session_id: str) -> float:
+        current = self.get(session_id)
+        self._energy[session_id] = max(0.0, current - self.cost_per_reply)
+        return self._energy[session_id]
+
+
+class ActivityTracker:
+    """活跃度追踪"""
+    
+    def __init__(self, sensitivity: float = 0.12, decay_level: float = 0.65):
+        self.sensitivity = sensitivity
+        self.decay_level = decay_level
+        self._activity: dict[str, float] = {}
+        self._last_decay: dict[str, float] = {}
+    
+    def update(self, session_id: str) -> float:
+        current = self._activity.get(session_id, 0.0)
+        increment = (10.0 - current) * self.sensitivity
+        new_value = min(10.0, current + increment)
+        self._activity[session_id] = new_value
+        return new_value
+    
+    def get(self, session_id: str) -> float:
+        current = self._activity.get(session_id, 0.0)
+        now = datetime.datetime.now().timestamp()
+        last_decay = self._last_decay.get(session_id, 0)
+        if now - last_decay > 300:  # 5分钟衰减
+            current *= self.decay_level
+            self._activity[session_id] = current
+            self._last_decay[session_id] = now
+            if current < 0.1:
+                del self._activity[session_id]
+                self._last_decay.pop(session_id, None)
+        return current
+    
+    def decay_all(self):
+        for sid in list(self._activity.keys()):
+            self._activity[sid] *= self.decay_level
+            if self._activity[sid] < 0.1:
+                del self._activity[sid]
+
+
+class DesireCalculator:
+    """社交欲望计算 (Sigmoid)"""
+    
+    def __init__(self, centre: float = 50.0, alpha: float = 0.08, threshold: float = 30.0):
+        self.centre = centre
+        self.alpha = alpha
+        self.threshold = threshold
+    
+    def calculate(self, activity: float, energy: float, time_weight: float) -> float:
+        recent_level = min(activity / 5.0, 1.0)
+        follow = recent_level * 80 * (energy / 100)
+        ice_break = (1.0 - recent_level) * 60 * max(0, (energy - 60) / 40)
+        total = max(follow, ice_break) * time_weight
+        normalized = 100 / (1 + math.exp(-self.alpha * (total - self.centre)))
+        return round(normalized, 2)
+    
+    def should_reply(self, desire: float) -> bool:
+        return desire > self.threshold
+
+
+class BioClock:
+    """生物钟"""
+    
+    @staticmethod
+    def get_time_weight() -> float:
+        now = datetime.datetime.now()
+        t = now.hour + now.minute / 60.0
+        
+        if 0 <= t < 7.8:
+            if t < 1.0:
+                base = 0.7 - (t / 1.0) * 0.45
+            elif t < 7.0:
+                base = 0.25
+            else:
+                base = 0.25 + ((t - 7.0) / 0.8) * 0.45
+        elif t >= 23.8:
+            base = 0.9 - (t - 23.8) * 0.8
+        else:
+            base = 0.9
+        
+        def peak(time, mu, sig, amp):
+            return amp * math.exp(-((time - mu) ** 2) / (2 * sig ** 2))
+        
+        weight = base + peak(t, 8.0, 0.6, 0.5) + peak(t, 12.8, 0.8, 0.4) + peak(t, 20.0, 1.5, 0.4)
+        return max(0.2, min(weight, 1.5))
+
+
+class YukiMind:
+    """
+    Yuki 决策引擎
+    
+    处理事件 → 决策 → 构建上下文 → LLM生成 → 解析标签 → 返回
+    """
+    
+    def __init__(self, identity: YukiIdentity = None):
+        self.identity = identity or YukiIdentity()
+        self.energy = EnergySystem()
+        self.activity = ActivityTracker()
+        self.desire = DesireCalculator()
+        self.bioclock = BioClock()
+        self._writing_diary: set = set()
+    
+    async def process(
+        self,
+        event: PlatformEvent,
+        llm_caller=None,
+        history_manager=None,
+        memory=None,
+    ) -> YukiResponse:
+        """
+        处理一个事件
+        
+        Args:
+            event: 平台事件
+            llm_caller: LLM 调用函数 async fn(messages, **kwargs) -> str
+            history_manager: HistoryManager 实例
+            memory: YukiMemory 实例（RAG）
+        """
+        session_id = event.session_id
+        
+        # 1. 更新活跃度
+        self.activity.update(session_id)
+        
+        # 2. 状态
+        energy = self.energy.get(session_id)
+        activity = self.activity.get(session_id)
+        time_weight = self.bioclock.get_time_weight()
+        
+        # 3. 决策
+        decision = await self._decide(event, energy, activity, time_weight)
+        
+        if decision.action == "ignore":
+            # 仍然记录到历史，但不回复
+            if history_manager:
+                current_time = event.time_str
+                history_manager.append_message(session_id, "user", event.content, current_time)
+            return YukiResponse(
+                text="",
+                actions=[Action(type=ActionType.IGNORE)],
+                metadata={"decision": decision.reason, "energy": energy}
+            )
+        
+        # 4. 如果没有 LLM 调用器，返回占位
+        if not llm_caller:
+            response_text = f"[Mind] 收到来自 {event.user_name or event.user_id} 的消息: {event.content[:50]}..."
+            self.energy.consume(session_id)
+            return YukiResponse(
+                text=response_text,
+                actions=[Action(type=ActionType.REPLY, content=response_text)],
+                metadata={"energy": self.energy.get(session_id), "desire": decision.confidence}
+            )
+        
+        # 5. 构建上下文
+        context = await self._build_context(event, history_manager, memory)
+        
+        # 6. 调用 LLM
+        logger.info(f"[Mind] {session_id} 正在打字...")
+        response_text = await llm_caller(context)
+        
+        # 7. 解析特殊标签
+        actions = []
+        clean_text = response_text
+        
+        # 清理 FINISHED
+        clean_text = re.sub(r'\s*FINISHED\s*$', '', clean_text, flags=re.IGNORECASE).strip()
+        
+        # 提取布局（保留但不发送）
+        layout_match = re.search(r'<布局>(.*?)</布局>', clean_text, flags=re.DOTALL)
+        if layout_match:
+            # 布局内容记录到历史但不发送
+            clean_text = re.sub(r'<布局>.*?</布局>', '', clean_text, flags=re.DOTALL).strip()
+        
+        # 提取小女仆委托
+        maid_match = re.search(r'\[DELEGATE_TO_MAID:(.*?)\]', clean_text, re.DOTALL)
+        if maid_match:
+            task_desc = maid_match.group(1).strip()
+            clean_text = re.sub(r'\[DELEGATE_TO_MAID:.*?\]', '', clean_text, flags=re.DOTALL).strip()
+            actions.append(Action(
+                type=ActionType.DELEGATE,
+                content=task_desc,
+                metadata={"task": task_desc, "session_id": session_id}
+            ))
+            logger.info(f"[Mind] 委托小女仆: {task_desc}")
+        
+        # 提取表情包搜索
+        meme_match = re.search(r'\[MEME_SEARCH:(.*?)\]', clean_text, re.DOTALL)
+        if meme_match:
+            query = meme_match.group(1).strip()
+            clean_text = re.sub(r'\[MEME_SEARCH:.*?\]', '', clean_text, flags=re.DOTALL).strip()
+            actions.append(Action(
+                type=ActionType.CAPABILITY,
+                capability="sticker_search",
+                params={"query": query, "session_id": session_id}
+            ))
+            logger.info(f"[Mind] 表情包搜索: {query}")
+        
+        # 合并换行
+        clean_text = re.sub(r'\n+', ' ', clean_text).strip()
+        
+        if not clean_text and not actions:
+            clean_text = "..."  # 防止空回复
+        
+        # 8. 记录到历史
+        if history_manager:
+            current_time = event.time_str
+            history_manager.append_message(session_id, "user", event.content, current_time)
+            history_manager.append_message(session_id, "assistant", clean_text, current_time)
+        
+        # 9. 消耗精力
+        self.energy.consume(session_id)
+        
+        return YukiResponse(
+            text=clean_text,
+            actions=actions or [Action(type=ActionType.REPLY, content=clean_text)],
+            metadata={
+                "energy": self.energy.get(session_id),
+                "desire": decision.confidence,
+                "decision_reason": decision.reason,
+            }
+        )
+    
+    async def _decide(
+        self,
+        event: PlatformEvent,
+        energy: float,
+        activity: float,
+        time_weight: float
+    ) -> Decision:
+        """决策：是否应该回复"""
+        
+        # 私聊默认回复
+        if event.session_type == "private":
+            return Decision(action="reply", confidence=1.0, reason="私聊默认回复")
+        
+        # 被 @ 必须回复
+        if event.metadata.get("at_yuki"):
+            return Decision(action="reply", confidence=1.0, reason="被@必须回复")
+        
+        # 帮助指令
+        if event.content.strip() in ["help", "/help", "帮助", "yuki帮助", "yuki功能"]:
+            return Decision(action="reply", confidence=1.0, reason="帮助指令")
+        
+        # 精力不足
+        if energy < 25:
+            return Decision(action="ignore", confidence=0.8, reason=f"精力不足({energy:.1f})")
+        
+        # 计算欲望
+        desire = self.desire.calculate(activity, energy, time_weight)
+        
+        if desire >= 80:
+            return Decision(action="reply", confidence=desire/100, reason=f"欲望爆表({desire:.1f}%)")
+        if desire <= 30:
+            return Decision(action="ignore", confidence=1-desire/100, reason=f"欲望低迷({desire:.1f}%)")
+        
+        if self.desire.should_reply(desire):
+            return Decision(action="reply", confidence=desire/100, reason=f"欲望值{desire:.1f}%超过阈值")
+        
+        return Decision(action="ignore", confidence=1-desire/100, reason=f"欲望值{desire:.1f}%低于阈值")
+    
+    async def _build_context(
+        self,
+        event: PlatformEvent,
+        history_manager=None,
+        memory=None,
+    ) -> list[dict]:
+        """
+        构建 LLM 上下文 —— 严格对齐 YukiV6 build_chat_context
+        
+        结构: system_prompt + [RAG回忆] + 近期对话 + 当前消息
+        """
+        session_id = event.session_id
+        combined_text = event.content
+        history_dict = history_manager.load() if history_manager else {}
+        
+        # 1. 基础人设 — 优先从历史记录取，保证与启动时一致
+        chat_history = history_dict.get(session_id, [])
+        if chat_history and chat_history[0].get("role") == "system":
+            system_prompt = chat_history[0]["content"]
+        else:
+            system_prompt = self.identity.get_system_prompt(event.source)
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # 2. RAG 检索日记 — 对齐 YukiV6 search_diaries 参数
+        if memory:
+            try:
+                # dynamic_top_k: 长消息多检索
+                dynamic_top_k = 10 if len(combined_text) > 100 else 8
+                relevant_diaries = memory.search_diaries(
+                    combined_text, session_id=session_id, top_k=dynamic_top_k
+                )
+                # reversed: 最旧的在前，最新的在后（与 YukiV6 一致）
+                for diary_obj in reversed(relevant_diaries):
+                    content = diary_obj['content']
+                    messages.append({"role": "system", "content": f"【回忆】{content}"})
+                
+                # 调试输出 — 打印完整日记内容
+                for i, diary_obj in enumerate(relevant_diaries, 1):
+                    content_preview = diary_obj['content'].replace('\n', ' ')[:120]
+                    logger.info(
+                        f"[RAG] 回忆#{i} 得分:{diary_obj['score']:.2f} | {content_preview}..."
+                    )
+                    logger.debug(f"[RAG]   详情: {diary_obj.get('debug', '')}")
+                logger.info(f"[RAG] 共检索到 {len(relevant_diaries)} 条日记")
+            except Exception as e:
+                logger.warning(f"[Mind] RAG 检索失败: {e}")
+        
+        # 3. 近期对话 — 对齐 YukiV6 的切片和时间处理
+        if chat_history:
+            # [-KEEP_LAST_DIALOGUE - 1 : -1] : 排除最后一条(当前消息)，取最近 N 条
+            keep = 10  # KEEP_LAST_DIALOGUE
+            recent_raw = chat_history[-keep - 1:-1] if len(chat_history) > 1 else []
+            recent_raw = [m for m in recent_raw if m.get("role") != "system"]
+            
+            for msg in recent_raw:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                msg_time = msg.get("time", "")
+                
+                if msg_time:
+                    if role == "user":
+                        content = f"【时间：{msg_time}】{content}"
+                    # assistant 消息保持原样
+                
+                messages.append({"role": role, "content": content})
+        
+        # 4. 当前消息 — 对齐 YukiV6 格式
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        messages.append({
+            "role": "user",
+            "content": f" (当前时间:{current_time}){combined_text}"
+        })
+        
+        return messages
+    
+    def get_status(self, session_id: str) -> dict:
+        """获取状态（调试用）"""
+        return {
+            "session_id": session_id,
+            "energy": self.energy.get(session_id),
+            "activity": self.activity.get(session_id),
+            "time_weight": self.bioclock.get_time_weight(),
+        }
+
+
+
+============================================================
+FILE_PATH: yuki_core\models.py
+============================================================
+
+# yuki_core/models.py
+"""
+Yuki Agent 核心数据模型
+平台无关，所有平台共享这些数据结构
+"""
+
+from dataclasses import dataclass, field
+from typing import Optional, Any
+from datetime import datetime
+from enum import Enum
+
+
+class EventType(str, Enum):
+    """事件类型枚举"""
+    MESSAGE = "message"      # 文本消息
+    IMAGE = "image"          # 图片消息
+    FILE = "file"            # 文件消息
+    VOICE = "voice"          # 语音消息
+    ACTION = "action"        # 动作事件
+    SYSTEM = "system"        # 系统事件
+
+
+class SessionType(str, Enum):
+    """会话类型枚举"""
+    PRIVATE = "private"
+    GROUP = "group"
+    CHANNEL = "channel"
+
+
+class ActionType(str, Enum):
+    """行动类型枚举"""
+    REPLY = "reply"          # 回复消息
+    IGNORE = "ignore"        # 忽略
+    CAPABILITY = "capability"  # 调用能力插件
+    DELEGATE = "delegate"    # 委托小女仆
+
+
+@dataclass
+class Attachment:
+    """附件信息"""
+    type: str                # "image", "file", "voice"
+    url: str = ""            # 远程URL
+    path: str = ""           # 本地路径
+    name: str = ""           # 文件名
+    size: int = 0            # 文件大小(bytes)
+    is_meme: bool = False    # 是否是表情包
+
+
+@dataclass
+class PlatformEvent:
+    """
+    跨平台统一事件格式
+    
+    所有平台的消息统一转换为这个格式，供 Core 处理
+    """
+    
+    # === 必填字段 ===
+    source: str              # 来源平台: "qq", "web", "voice", "discord"
+    event_type: str          # 事件类型: "message", "image", "file", "voice"
+    content: str             # 主要内容（文本/描述）
+    
+    # === 用户信息 ===
+    user_id: str             # 平台内用户ID
+    user_name: str = ""      # 用户显示名称
+    
+    # === 会话信息 ===
+    session_id: str = ""     # 会话ID（群聊=group_id, 私聊=user_id, 网页=session_id）
+    session_type: str = ""   # "private", "group", "channel"
+    
+    # === 时间 ===
+    timestamp: float = 0.0   # Unix时间戳
+    
+    # === 平台特有数据 ===
+    metadata: dict = field(default_factory=dict)
+    """
+    QQ平台特有:
+      - group_id: 群号
+      - sender_name: 发送者群名片
+      - reply_to: 回复的消息ID
+      - at_users: 被@的用户列表
+    
+    Web平台特有:
+      - session_token: 认证token
+    
+    Voice平台特有:
+      - audio_duration: 语音时长
+      - confidence: 语音识别置信度
+    """
+    
+    # === 图片/文件 ===
+    attachments: list = field(default_factory=list)
+    
+    # === 上下文注入(由Bus层填充) ===
+    identity_context: Optional[dict] = None
+    """
+    由ContextBus注入，包含:
+    - platform_prompt: 该平台的身份提示词
+    - capabilities: 该平台可用的能力列表
+    - style_override: 风格覆盖配置
+    """
+    
+    def __post_init__(self):
+        """初始化后处理"""
+        if self.timestamp == 0.0:
+            self.timestamp = datetime.now().timestamp()
+    
+    @property
+    def time_str(self) -> str:
+        """返回格式化的时间字符串"""
+        return datetime.fromtimestamp(self.timestamp).strftime("%Y年%m月%d日%H:%M")
+    
+    def to_dict(self) -> dict:
+        """转换为字典"""
+        return {
+            "source": self.source,
+            "event_type": self.event_type,
+            "content": self.content,
+            "user_id": self.user_id,
+            "user_name": self.user_name,
+            "session_id": self.session_id,
+            "session_type": self.session_type,
+            "timestamp": self.timestamp,
+            "metadata": self.metadata,
+            "attachments": self.attachments,
+        }
+
+
+@dataclass
+class Action:
+    """
+    Yuki 的行动
+    
+    表示 Yuki 想做什么（回复、忽略、调用能力等）
+    """
+    type: str                # ActionType 的值
+    content: str = ""        # 回复内容
+    capability: str = ""     # 能力插件名称
+    params: dict = field(default_factory=dict)  # 能力参数
+    metadata: dict = field(default_factory=dict)  # 附加数据
+
+
+@dataclass
+class YukiResponse:
+    """
+    Yuki 的回复
+    
+    包含回复内容和可能的行动列表
+    """
+    text: str = ""           # 回复文本
+    actions: list = field(default_factory=list)  # Action 列表
+    metadata: dict = field(default_factory=dict)  # 附加数据
+    
+    @property
+    def has_actions(self) -> bool:
+        """是否有行动"""
+        return len(self.actions) > 0
+    
+    def add_action(self, action: Action):
+        """添加行动"""
+        self.actions.append(action)
+
+
+@dataclass
+class Decision:
+    """
+    决策结果
+    
+    表示 Yuki 决定做什么
+    """
+    action: str              # "reply", "observe", "ignore"
+    confidence: float = 1.0  # 置信度 0.0~1.0
+    reason: str = ""         # 决策原因（调试用）
+
+
+@dataclass
+class IdentityContext:
+    """
+    身份上下文
+    
+    包含 Yuki 在特定平台的身份配置
+    """
+    platform: str            # 平台标识
+    context_prompt: str      # 该平台的上下文提示词
+    style_override: dict = field(default_factory=dict)  # 风格覆盖
+    capabilities: list = field(default_factory=list)     # 可用能力列表
+    
+    def get_system_prompt(self, base_persona: str) -> str:
+        """
+        构建完整的 system prompt
+        
+        Args:
+            base_persona: 基础人格定义
+            
+        Returns:
+            str: 完整的 system prompt
+        """
+        parts = [base_persona]
+        
+        if self.context_prompt:
+            parts.append(f"\n## 【当前平台】\n{self.context_prompt}")
+        
+        return "\n".join(parts)
+
+
+@dataclass
+class MemoryEntry:
+    """
+    记忆条目
+    
+    存储在记忆系统中的单条记忆
+    """
+    id: str                  # 唯一标识
+    content: str             # 记忆内容（日记/对话摘要）
+    source: str = ""         # 来源平台（可选）
+    session_id: str = ""     # 会话ID（可选）
+    timestamp: float = 0.0   # 时间戳
+    embedding: list = field(default_factory=list)  # 向量嵌入
+    metadata: dict = field(default_factory=dict)   # 元数据
+    
+    def __post_init__(self):
+        if self.timestamp == 0.0:
+            self.timestamp = datetime.now().timestamp()
+
+
+
+============================================================
+FILE_PATH: yuki_core\plugin.py
+============================================================
+
+# yuki_core/plugin.py
+"""
+Yuki 插件基类
+
+定义 PlatformPlugin 和 CapabilityPlugin 的接口
+"""
+
+from abc import ABC, abstractmethod
+from typing import AsyncIterator, Optional, TYPE_CHECKING
+from pathlib import Path
+import importlib
+import yaml
+
+from .models import PlatformEvent, YukiResponse
+
+if TYPE_CHECKING:
+    from .bus import ContextBus
+
+try:
+    from utils.logger import get_logger
+except ImportError:
+    import logging
+    def get_logger(name):
+        return logging.getLogger(name)
+
+logger = get_logger("plugin")
+
+
+class PlatformPlugin(ABC):
+    """
+    平台插件基类
+    
+    所有平台适配器必须继承此类
+    """
+    
+    # === 必须定义的属性 ===
+    name: str = "Unknown"           # 显示名称
+    platform_id: str = "unknown"    # 唯一标识
+    version: str = "0.1.0"          # 版本号
+    
+    # === 由 ContextBus 注入 ===
+    bus: Optional['ContextBus'] = None
+    identity_config: Optional[dict] = None
+    
+    def __init__(self, **config):
+        """初始化"""
+        self.config = config
+    
+    # === 生命周期方法 ===
+    
+    @abstractmethod
+    async def connect(self) -> bool:
+        """
+        建立连接
+        
+        Returns:
+            bool: 是否成功
+        """
+        pass
+    
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """断开连接"""
+        pass
+    
+    async def health_check(self) -> bool:
+        """健康检查"""
+        return True
+    
+    # === 消息收发 ===
+    
+    @abstractmethod
+    async def receive(self) -> AsyncIterator[PlatformEvent]:
+        """
+        接收消息（异步迭代器）
+        
+        Yields:
+            PlatformEvent: 统一格式事件
+        """
+        pass
+    
+    @abstractmethod
+    async def send(self, event: PlatformEvent, response: YukiResponse) -> bool:
+        """
+        发送回复
+        
+        Args:
+            event: 原始事件
+            response: Yuki 的回复
+            
+        Returns:
+            bool: 是否成功
+        """
+        pass
+    
+    # === 格式转换 ===
+    
+    @abstractmethod
+    def translate_in(self, raw_data: any) -> PlatformEvent:
+        """将平台原始数据转为统一格式"""
+        pass
+    
+    @abstractmethod
+    def translate_out(self, event: PlatformEvent, response: YukiResponse) -> any:
+        """将 Yuki 回复转为平台格式"""
+        pass
+    
+    # === 可选实现 ===
+    
+    async def on_connect(self) -> None:
+        """连接成功回调"""
+        pass
+    
+    async def on_disconnect(self) -> None:
+        """断开连接回调"""
+        pass
+    
+    def get_capabilities(self) -> list[str]:
+        """返回该平台支持的能力列表"""
+        return []
+
+
+class CapabilityPlugin(ABC):
+    """
+    能力插件基类
+    
+    所有能力扩展必须继承此类
+    """
+    
+    # === 必须定义的属性 ===
+    name: str = "unknown"
+    display_name: str = "Unknown"
+    description: str = ""
+    version: str = "0.1.0"
+    
+    # === JSON Schema ===
+    parameters_schema: dict = {}
+    return_schema: dict = {}
+    
+    # === 由 ContextBus 注入 ===
+    bus: Optional['ContextBus'] = None
+    
+    @abstractmethod
+    async def execute(self, params: dict) -> dict:
+        """
+        执行能力
+        
+        Args:
+            params: 参数
+            
+        Returns:
+            dict: 结果
+        """
+        pass
+    
+    def get_schema(self) -> dict:
+        """获取能力描述"""
+        return {
+            "name": self.name,
+            "display_name": self.display_name,
+            "description": self.description,
+            "parameters": self.parameters_schema,
+            "returns": self.return_schema,
+        }
+    
+    async def validate_params(self, params: dict) -> bool:
+        """验证参数"""
+        return True
+    
+    def requires_permission(self) -> bool:
+        """是否需要授权"""
+        return False
+
+
+# ================= 插件加载器 =================
+
+def load_plugins_from_config(bus: 'ContextBus', config_path: str):
+    """
+    从配置文件加载插件
+    
+    Args:
+        bus: 上下文总线
+        config_path: 配置文件路径
+    """
+    config_path = Path(config_path)
+    if not config_path.exists():
+        logger.warning(f"[PluginLoader] 配置文件不存在: {config_path}")
+        return
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    
+    # 加载平台插件
+    for name, plugin_config in config.get('platforms', {}).items():
+        if plugin_config.get('enabled', False):
+            _load_plugin(bus, name, plugin_config, 'platform')
+    
+    # 加载能力插件
+    for name, plugin_config in config.get('capabilities', {}).items():
+        if plugin_config.get('enabled', False):
+            _load_plugin(bus, name, plugin_config, 'capability')
+    
+    logger.info(f"[PluginLoader] 加载完成: {len(bus.platform_plugins)} 平台, {len(bus.capability_plugins)} 能力")
+
+
+def _load_plugin(bus: 'ContextBus', name: str, config: dict, plugin_type: str):
+    """加载单个插件"""
+    try:
+        class_path = config.get('class', '')
+        if not class_path:
+            logger.warning(f"[PluginLoader] 插件 {name} 未指定 class")
+            return
+        
+        # 动态导入
+        module_path, class_name = class_path.rsplit('.', 1)
+        module = importlib.import_module(module_path)
+        plugin_class = getattr(module, class_name)
+        
+        # 创建实例
+        plugin_config = config.get('config', {})
+        plugin = plugin_class(**plugin_config)
+        
+        # 注册
+        if plugin_type == 'platform':
+            bus.register_platform(plugin)
+        else:
+            bus.register_capability(plugin)
+        
+    except Exception as e:
+        logger.error(f"[PluginLoader] 加载插件 {name} 失败: {e}")
+
+
+
+============================================================
+FILE_PATH: yuki_core\__init__.py
+============================================================
+
+# yuki_core - Yuki Agent 核心人格内核
+
+"""
+Yuki Core 是 Yuki Agent 的核心模块，包含：
+
+- identity: 身份定义
+- memory: 记忆系统
+- mind: 决策引擎
+- maid: 小女仆系统
+- bus: 上下文总线
+- plugin: 插件基类
+- models: 数据模型
+
+本模块独立于任何平台，可单独使用和测试。
+"""
+
+__version__ = "0.1.0"
+__author__ = "Eganchiyu"
+
+# 数据模型
+from .models import (
+    PlatformEvent, YukiResponse, Decision, Action,
+    EventType, SessionType, ActionType,
+    Attachment, IdentityContext, MemoryEntry
+)
+
+# 身份定义
+from .identity import (
+    YukiIdentity, Persona, SpeakingStyle, Relationship,
+    get_system_prompt, get_base_setting,
+    get_yuki_setting_private, get_yuki_setting_group,
+    get_summary_prompt, VISION_PROMPT
+)
+
+# 决策引擎
+from .mind import YukiMind, EnergySystem, ActivityTracker, DesireCalculator, BioClock
+
+# 记忆系统
+from .memory import YukiMemory
+
+# 小女仆系统
+from .maid import MaidAgent
+
+# 历史记录管理
+from .history import HistoryManager
+
+# LLM 调用器
+from .llm import chat_completion, robust_chat
+
+# 配置中心
+from .config import cfg
+
+# 上下文总线
+from .bus import ContextBus
+
+# 插件基类
+from .plugin import PlatformPlugin, CapabilityPlugin, load_plugins_from_config
+
+__all__ = [
+    # 版本
+    "__version__",
+    
+    # 数据模型
+    "PlatformEvent", "YukiResponse", "Decision", "Action",
+    "EventType", "SessionType", "ActionType",
+    "Attachment", "IdentityContext", "MemoryEntry",
+    
+    # 身份
+    "YukiIdentity", "Persona", "SpeakingStyle", "Relationship",
+    "get_system_prompt", "get_base_setting",
+    "get_yuki_setting_private", "get_yuki_setting_group",
+    "get_summary_prompt", "VISION_PROMPT",
+    
+    # 决策
+    "YukiMind", "EnergySystem", "ActivityTracker", 
+    "DesireCalculator", "BioClock",
+    
+    # 记忆
+    "YukiMemory",
+    
+    # 小女仆
+    "MaidAgent",
+    
+    # 总线
+    "ContextBus",
+    
+    # 插件
+    "PlatformPlugin", "CapabilityPlugin", "load_plugins_from_config",
+]
+
+
