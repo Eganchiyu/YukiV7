@@ -1,6 +1,15 @@
 # Yuki Agent 插件配置
 # 控制各插件的启用状态和参数
 
+# ================= 机器人身份 =================
+robot_name: "yuki"
+master_name: "主人"
+master_id: 0           # 主人 QQ 号（必须配置）
+keywords:              # 注意力关键词（被@时强制回复）
+  - 主人
+  - 哥哥
+  - yuki
+
 # ================= 平台插件 =================
 platforms:
   
@@ -30,83 +39,58 @@ platforms:
     class: "plugins.platforms.voice_plugin.VoicePlugin"
     description: "语音交互"
     config:
-      whisper_model: "base"    # Whisper模型大小
+      whisper_model: "base"
       tts_enabled: false
-      tts_model: ""            # GPT-SoVITS模型路径
+      tts_model: ""
 
 # ================= 能力插件 =================
 capabilities:
   
   web_search:
-    enabled: true
+    enabled: false
     class: "plugins.capabilities.web_search.WebSearchPlugin"
     description: "联网搜索"
     config:
-      provider: "duckduckgo"   # 搜索引擎: duckduckgo, bing, google
+      provider: "duckduckgo"
       max_results: 5
 
   file_manager:
-    enabled: true
+    enabled: false
     class: "plugins.capabilities.file_manager.FileManagerPlugin"
     description: "文件读写操作"
     config:
-      allowed_dirs:            # 允许访问的目录
+      allowed_dirs:
         - "~/Documents"
         - "~/Desktop"
         - "D:/Projects"
-      max_file_size: "10MB"    # 最大文件大小
-
-  code_executor:
-    enabled: false
-    class: "plugins.capabilities.code_executor.CodeExecutorPlugin"
-    description: "代码执行"
-    config:
-      timeout: 30              # 执行超时(秒)
-      max_memory: "512MB"
-      allowed_languages: ["python", "javascript"]
-
-  weather:
-    enabled: false
-    class: "plugins.capabilities.weather.WeatherPlugin"
-    description: "天气查询"
-    config:
-      api_key: ""
-      default_city: "Xi'an"
-
-  calendar:
-    enabled: false
-    class: "plugins.capabilities.calendar.CalendarPlugin"
-    description: "日历管理"
-    config:
-      # 后续扩展
+      max_file_size: "10MB"
 
 # ================= 社交插件 =================
 social:
   
   sticker_system:
-    enabled: true
+    enabled: false
     class: "plugins.social.sticker_system.StickerSystem"
     description: "表情包系统"
     platforms: [qq]
     config:
       vector_db_path: "./data/sticker_vectors"
       cache_file: "./data/meme_cache.json"
-      max_concurrent: 3
 
   ice_breaker:
-    enabled: true
+    enabled: false
     class: "plugins.social.ice_breaker.IceBreaker"
     description: "破冰主动唤醒"
     platforms: [qq]
     config:
-      check_interval: 300      # 检查间隔(秒)
-      min_silence: 1800        # 最小沉默时间(秒)
-      max_attempts: 3          # 最大尝试次数
+      check_interval: 300
+      min_silence: 1800
+      max_attempts: 3
 
   group_manager:
-    enabled: true
+    enabled: false
     class: "plugins.social.group_manager.GroupManager"
     description: "群聊管理"
     platforms: [qq]
     config:
-      master_only_commands: ["/开启", "/关闭"]  # 只有主人能用的命令
+      master_only_commands: ["/开启", "/关闭"]
