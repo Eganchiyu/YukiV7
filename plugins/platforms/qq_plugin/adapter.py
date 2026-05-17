@@ -236,7 +236,7 @@ class QQPlugin(PlatformPlugin):
                 if response and response.text:
                     await self.send(event, response)
         
-        except asyncio.CancelledError:
+        except _asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error(f"[QQ] 缓冲处理异常: {e}")
