@@ -1,38 +1,25 @@
-# plugins/platforms/qq_plugin/napcat_ws.py
-"""
-NapCat WebSocket 连接管理
-
-从 YukiV6 network/ws_connection.py 重构，移除 config 依赖
-"""
-
+# ws_connection.py
 import json
 import asyncio
-import logging
-from typing import Optional, Dict, AsyncIterator
+import websockets
 from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
+from typing import Optional, Dict
+from yuki_core.config import cfg
 from asyncio import Future
+import logging
+logger = logging.getLogger("ws_connection")
 
-logger = logging.getLogger("napcat_ws")
 
 
-class NapCatWS:
-    """
-    NapCat WebSocket 连接管理器
-    
-    职责：
-    - 管理与 NapCat 的 WebSocket 连接
-    - 自动重连
-    - 请求-响应模式 (echo 机制)
-    - 事件流监听
-    """
-    
-    def __init__(self, ws_url: str, ws_token: str = ""):
+class BotConnector:
+    def __init__(self, ws_url: str = cfg.NAPCAT_WS_URL, ws_token: str = None):
         self.ws_url = ws_url
-        self.ws_token = ws_token
+        self.ws_token = ws_token if ws_token is not None else cfg.NAPCAT_WS_TOKEN
         self.websocket = None
         self._lock = asyncio.Lock()
+        # 新增：用于存放等待响应的 Future 对象
         self._response_futures: Dict[str, Future] = {}
-    
+
     def _get_connection_url(self) -> str:
         """如有 token，将其作为 access_token 拼接到 URL"""
         if not self.ws_token:
@@ -43,124 +30,98 @@ class NapCatWS:
             query_params["access_token"] = [self.ws_token]
         new_query = urlencode(query_params, doseq=True)
         return urlunparse(parsed._replace(query=new_query))
-    
-    async def connect(self) -> bool:
-        """建立连接，返回是否成功"""
-        try:
-            await self.ensure_connection()
-            return True
-        except Exception as e:
-            logger.error(f"[NapCatWS] 连接失败: {e}")
-            return False
-    
+
     async def ensure_connection(self):
-        """确保返回一个真正 OPEN 的连接"""
-        import websockets
-        
+        """最兼容的版本判断：确保返回一个真正 OPEN 的连接"""
         async with self._lock:
+            # 使用 hasattr 进行安全检查，或者直接判断对象是否存在
+            # 核心逻辑：如果对象不存在，或者对象的状态不是 OPEN (1)
             is_alive = False
             if self.websocket is not None:
                 try:
+                    # websockets 库最通用的检查方式是查看其 protocol 状态机
+                    # 或者直接检查 connection 状态
                     from websockets.protocol import State
                     is_alive = self.websocket.state == State.OPEN
                 except Exception:
+                    # 如果找不到 State 枚举，回退到最原始的尝试
                     try:
                         is_alive = not self.websocket.closed
                     except AttributeError:
                         try:
                             is_alive = self.websocket.open
                         except AttributeError:
-                            is_alive = False
-            
+                            is_alive = False  # 属性全无，视为失效
+
             if not is_alive:
                 if self.websocket is not None:
-                    logger.warning("[NapCatWS] 检测到连接异常，正在重建...")
-                
+                    logger.warning("[Network] 检测到连接状态异常，正在重建...")
+
                 connect_url = self._get_connection_url()
                 self.websocket = await websockets.connect(
                     connect_url,
                     ping_interval=20,
                     ping_timeout=60,
-                    close_timeout=10,
+                    close_timeout=10
                 )
-                logger.info(f"[NapCatWS] 连接已建立: {self.ws_url}")
-            
+                logger.info(f"[Network] 全局连接已建立: {self.ws_url}")
+
             return self.websocket
-    
-    async def listen(self) -> AsyncIterator[dict]:
-        """
-        闭环监听：统一接收并分发消息
-        
-        Yields:
-            dict: NapCat 原始事件数据
-        """
+
+    async def listen(self):
+        """闭环监听：统一接收并分发消息"""
         while True:
             try:
                 ws = await self.ensure_connection()
                 async for message in ws:
                     data = json.loads(message)
-                    
-                    # 检查是否有等待此 echo 的请求
+
+                    # 关键逻辑：检查是否有正在等待这个 echo 的请求
                     echo = data.get("echo")
                     if echo and echo in self._response_futures:
                         future = self._response_futures.pop(echo)
                         if not future.done():
                             future.set_result(data)
-                    
+
+                    # 正常的事件流抛出
                     yield data
-                    
-            except asyncio.CancelledError:
-                logger.info("[NapCatWS] 监听已取消")
-                break
             except Exception as e:
-                logger.error(f"[NapCatWS] 监听异常: {e}")
+                logger.error(f"[Network] 监听异常: {e}")
                 self.websocket = None
                 await asyncio.sleep(3)
-    
-    async def send_raw(self, data: dict):
-        """发送原始 JSON 数据"""
-        ws = await self.ensure_connection()
-        await ws.send(json.dumps(data))
-    
-    async def send_request(self, action: str, params: dict, echo: str) -> Optional[dict]:
-        """
-        发送请求并等待响应（echo 机制）
-        
-        Args:
-            action: NapCat API 动作名
-            params: 参数
-            echo: 唯一标识，用于匹配响应
-            
-        Returns:
-            dict: 响应数据，超时返回 None
-        """
-        try:
-            ws = await self.ensure_connection()
-            
-            loop = asyncio.get_running_loop()
-            future = loop.create_future()
-            self._response_futures[echo] = future
-            
-            request = {"action": action, "params": params, "echo": echo}
-            await ws.send(json.dumps(request))
-            
-            try:
-                return await asyncio.wait_for(future, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(f"[NapCatWS] 请求 {action} 超时 (echo: {echo})")
-                return None
-            finally:
-                self._response_futures.pop(echo, None)
-                
-        except Exception as e:
-            logger.error(f"[NapCatWS] 请求异常: {e}")
-            self._response_futures.pop(echo, None)
-            return None
-    
-    async def disconnect(self):
+
+    async def close(self):
         """优雅关闭"""
         async with self._lock:
             if self.websocket:
                 await self.websocket.close()
                 self.websocket = None
-                logger.info("[NapCatWS] 连接已关闭")
+
+    async def send_request(self, action: str, params: dict, echo: str) -> Optional[Dict]:
+        try:
+            ws = await self.ensure_connection()
+
+            # 1. 注册 Future
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            self._response_futures[echo] = future
+
+            request = {"action": action, "params": params, "echo": echo}
+            await ws.send(json.dumps(request))
+
+            try:
+                # 2. 等待结果 (这里才需要 await)
+                return await asyncio.wait_for(future, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"请求 {action} 超时 (echo: {echo})")
+                return None
+            finally:
+                # 3. 无论成功还是超时，都要清理字典
+                # pop 是同步操作，不需要 await
+                self._response_futures.pop(echo, None)
+
+        except Exception as e:
+            logger.error(f"网络异常: {e}")
+            self._response_futures.pop(echo, None)
+            return None
+
