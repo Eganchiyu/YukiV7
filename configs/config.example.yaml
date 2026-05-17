@@ -1,0 +1,93 @@
+# Yuki Agent 主配置文件
+# 请复制为 config.yaml 并填入你的配置
+
+# ================= 身份配置 =================
+robot_name: yuki
+master_name: 主人
+
+# ================= API 配置 =================
+api:
+  # 首选 LLM 平台
+  llm_platform: deepseek      # deepseek / dashscope / openai
+  llm_api_key: ""
+  llm_base_url: ""            # 留空使用默认地址
+  
+  # 备选 LLM 平台（主线路失败时使用）
+  backup_platform: deepseek
+  backup_api_key: ""
+  backup_base_url: ""
+  
+  # 视觉模型平台
+  vision_platform: dashscope
+  vision_api_key: ""
+  image_process_url: ""
+
+# ================= 模型配置 =================
+model:
+  llm: deepseek-chat          # 主对话模型
+  backup: deepseek-chat       # 备用对话模型
+  vision: qwen3-vl-flash      # 视觉模型
+  disable_thinking: true      # 关闭模型的thinking输出
+
+# ================= 连接配置 =================
+connection:
+  napcat_ws_url: "ws://localhost:3001"
+  napcat_ws_token: ""
+  max_retries: 3
+
+# ================= 目标配置 =================
+target:
+  qq: 0                       # 私聊目标QQ号
+  groups: []                  # 目标群聊QQ号列表，空=全部
+
+# ================= 日记配置 =================
+diary:
+  idle_seconds: 120           # 空闲多久触发日记
+  min_turns: 15               # 最小对话轮数
+  max_length: 50              # 历史超过此条数强制写日记
+
+# ================= RAG 配置 =================
+rag:
+  retrieval_top_k: 20         # 检索返回最大条数
+  keep_last_dialogue: 10      # 保留的近期对话条数
+
+# ================= 时间配置 =================
+timing:
+  debounce_time: 32           # 消息防抖时间(秒)
+  request_timeout:
+    total: 60
+    connect: 10
+    sock_read: 30
+
+# ================= 精力值配置 =================
+energy:
+  initial: 100                # 初始精力值
+  max: 100.0                  # 最大精力值
+  recovery_per_min: 0.8       # 每分钟恢复
+  cost_per_reply: 6           # 每次回复消耗
+  min_active: 25              # 低活跃阈值
+
+# ================= 注意力配置 =================
+attention:
+  sensitivity: 0.12           # 敏感度
+  decay_level: 0.65           # 衰减系数
+  sigmoid_centre: 50.0        # Sigmoid中心
+  sigmoid_alpha: 0.08         # Sigmoid陡峭度
+  keywords:                   # 注意力关键词
+    - 主人
+    - 哥哥
+
+# ================= 路径配置 =================
+paths:
+  vector_db: "./yuki_memory"
+  embed_model: "./models/text2vec-base-chinese"
+  history_file: "./data/chat_history.json"
+  log_file: "./data/yuki_log.txt"
+  cache_dir: "./data"
+  cache_file: "./data/meme_cache.json"
+
+# ================= 安全配置 =================
+max_message_length: 150       # 单条消息最大长度
+
+# ================= 调试配置 =================
+debug: true
