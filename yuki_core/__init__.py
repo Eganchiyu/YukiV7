@@ -41,6 +41,15 @@ from .memory import YukiMemory
 # 小女仆系统
 from .maid import MaidAgent
 
+# 历史记录管理
+from .history import HistoryManager
+
+# LLM 调用器
+from .llm import chat_completion, robust_chat
+
+# 配置中心
+from .config import cfg
+
 # 上下文总线
 from .bus import ContextBus
 

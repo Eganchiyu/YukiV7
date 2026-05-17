@@ -1,96 +1,86 @@
-# Yuki Agent 插件配置
-# 控制各插件的启用状态和参数
-
-# ================= 机器人身份 =================
-robot_name: "yuki"
-master_name: "主人"
-master_id: 0           # 主人 QQ 号（必须配置）
-keywords:              # 注意力关键词（被@时强制回复）
-  - 主人
-  - 哥哥
-  - yuki
-
-# ================= 平台插件 =================
+robot_name: Yuki
+master_name: 池宇健
+master_id: 737337230
+keywords:
+- 主人
+- 哥哥
+- yuki
 platforms:
-  
   qq:
     enabled: true
-    class: "plugins.platforms.qq_plugin.QQPlugin"
-    description: "QQ Bot 适配器 (NapCat)"
+    class: plugins.platforms.qq_plugin.QQPlugin
+    description: QQ Bot 适配器 (NapCat)
     config:
-      napcat_ws_url: "ws://localhost:3001"
-      napcat_ws_token: ""
-      target_groups: []        # 空列表=响应所有群，填群号=只响应指定群
-      target_qq: 0             # 私聊目标QQ号
-      debounce_time: 32        # 消息防抖时间(秒)
-      max_message_length: 150  # 单条消息最大长度
-
+      napcat_ws_url: ws://127.0.0.1:3001
+      napcat_ws_token: ''
+      target_groups:
+      - 1057020972
+      - 1034986009
+      target_qq: 737337230
+      debounce_time: 32
+      max_message_length: 150
   web:
     enabled: false
-    class: "plugins.platforms.web_plugin.WebPlugin"
-    description: "网页聊天界面"
+    class: plugins.platforms.web_plugin.WebPlugin
+    description: 网页聊天界面
     config:
-      host: "127.0.0.1"
+      host: 127.0.0.1
       port: 8080
-      cors_origins: ["*"]
-
+      cors_origins:
+      - '*'
   voice:
     enabled: false
-    class: "plugins.platforms.voice_plugin.VoicePlugin"
-    description: "语音交互"
+    class: plugins.platforms.voice_plugin.VoicePlugin
+    description: 语音交互
     config:
-      whisper_model: "base"
+      whisper_model: base
       tts_enabled: false
-      tts_model: ""
-
-# ================= 能力插件 =================
+      tts_model: ''
 capabilities:
-  
   web_search:
     enabled: false
-    class: "plugins.capabilities.web_search.WebSearchPlugin"
-    description: "联网搜索"
+    class: plugins.capabilities.web_search.WebSearchPlugin
+    description: 联网搜索
     config:
-      provider: "duckduckgo"
+      provider: duckduckgo
       max_results: 5
-
   file_manager:
     enabled: false
-    class: "plugins.capabilities.file_manager.FileManagerPlugin"
-    description: "文件读写操作"
+    class: plugins.capabilities.file_manager.FileManagerPlugin
+    description: 文件读写操作
     config:
       allowed_dirs:
-        - "~/Documents"
-        - "~/Desktop"
-        - "D:/Projects"
-      max_file_size: "10MB"
-
-# ================= 社交插件 =================
+      - ~/Documents
+      - ~/Desktop
+      - D:/Projects
+      max_file_size: 10MB
 social:
-  
   sticker_system:
     enabled: false
-    class: "plugins.social.sticker_system.StickerSystem"
-    description: "表情包系统"
-    platforms: [qq]
+    class: plugins.social.sticker_system.StickerSystem
+    description: 表情包系统
+    platforms:
+    - qq
     config:
-      vector_db_path: "./data/sticker_vectors"
-      cache_file: "./data/meme_cache.json"
-
+      vector_db_path: ./data/sticker_vectors
+      cache_file: ./data/meme_cache.json
   ice_breaker:
     enabled: false
-    class: "plugins.social.ice_breaker.IceBreaker"
-    description: "破冰主动唤醒"
-    platforms: [qq]
+    class: plugins.social.ice_breaker.IceBreaker
+    description: 破冰主动唤醒
+    platforms:
+    - qq
     config:
       check_interval: 300
       min_silence: 1800
       max_attempts: 3
-
   group_manager:
     enabled: false
-    class: "plugins.social.group_manager.GroupManager"
-    description: "群聊管理"
-    platforms: [qq]
+    class: plugins.social.group_manager.GroupManager
+    description: 群聊管理
+    platforms:
+    - qq
     config:
-      master_only_commands: ["/开启", "/关闭"]
+      master_only_commands:
+      - /开启
+      - /关闭
