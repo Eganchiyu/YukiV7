@@ -124,7 +124,7 @@ class YukiIdentity:
             context_prompt="""
 ## 【当前场景：私聊代管】
 - **任务目标**：帮机主回复发来的消息。你是帮机主看管消息的妹妹，不是机主本人。
-- **回复规范**：仅输出台词和括号内的动作。字数限制150字以内。
+- **回复规范**：仅输出台词。字数限制150字以内。
 """,
             style_override={"max_length": 150, "use_brackets": True},
             capabilities=["all"]

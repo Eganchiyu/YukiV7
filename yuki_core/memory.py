@@ -364,6 +364,114 @@ class YukiMemory:
         
         return results
     
+    # ================= 对齐 YukiV6 的 search_diaries =================
+    
+    def search_diaries(self, query_text: str, session_id: str = None, n_results: int = 12, top_k: int = 8) -> list[dict]:
+        """
+        并行双池检索 — 严格对齐 YukiV6 modules/memory/rag.py search_diaries
+        
+        返回: [{"content": str, "score": float, "debug": str}, ...]
+        """
+        self._ensure_initialized()
+        
+        if not self._collection or not query_text.strip():
+            return []
+        
+        total_count = self._collection.count()
+        if total_count == 0:
+            return []
+        
+        cid_str = str(session_id) if session_id else None
+        filter_cond = {"session_id": {"$in": [cid_str, "manual_record"]}} if cid_str else None
+        
+        # 关键词提取
+        raw_keywords = jieba.analyse.extract_tags(query_text, topK=top_k, withWeight=True)
+        keywords_with_weight = [
+            (kw, w) for kw, w in raw_keywords
+            if kw.lower() not in self._blacklist
+        ]
+        logger.debug(f"[RAG] 关键词: {keywords_with_weight}")
+        
+        # 语义池
+        query_embedding = self._model.encode(query_text).tolist()
+        vector_results = self._collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(n_results, total_count),
+            where=filter_cond,
+            include=["documents", "distances", "metadatas"]
+        )
+        
+        # 关键词池（全量扫描）
+        all_docs = self._collection.get(where=filter_cond, include=["documents", "metadatas"])
+        
+        # 合并
+        combined_map = {}
+        max_v_score = 0.0
+        
+        # 处理语义池
+        if vector_results['documents'] and vector_results['documents'][0]:
+            max_v_score = 1.0 - vector_results['distances'][0][0]
+            for i in range(len(vector_results['documents'][0])):
+                doc_id = vector_results['ids'][0][i]
+                score = 1.0 - vector_results['distances'][0][i]
+                combined_map[doc_id] = {
+                    "doc": vector_results['documents'][0][i],
+                    "meta": vector_results['metadatas'][0][i],
+                    "base_score": score,
+                    "source": "语义池"
+                }
+        
+        # 处理关键词池
+        initial_kw_score = max_v_score * 0.85
+        kw_found = 0
+        if all_docs['documents']:
+            for i in range(len(all_docs['documents'])):
+                doc_id = all_docs['ids'][i]
+                content = all_docs['documents'][i]
+                matched = [kw for kw, _ in keywords_with_weight if kw in content]
+                if matched and doc_id not in combined_map:
+                    combined_map[doc_id] = {
+                        "doc": content,
+                        "meta": all_docs['metadatas'][i],
+                        "base_score": initial_kw_score,
+                        "source": "关键词打捞"
+                    }
+                    kw_found += 1
+        
+        # 计算最终分数
+        final_results = []
+        for item in combined_map.values():
+            scored = self._calculate_final_item(
+                item["doc"], item["meta"], item["base_score"], keywords_with_weight
+            )
+            if scored:
+                scored["debug"] = f"[{item['source']}] {scored['debug']}"
+                final_results.append(scored)
+        
+        # 排序截断
+        final_results.sort(key=lambda x: x['score'], reverse=True)
+        
+        logger.info(f"[RAG] 检索完成: {len(final_results)} 条 (语义:{len(combined_map)-kw_found} + 关键词:{kw_found})")
+        return final_results[:12]
+    
+    @staticmethod
+    def _calculate_final_item(doc, meta, base_score, keywords_with_weight):
+        """计算最终分数 — 对齐 YukiV6"""
+        keyword_boost = 0.0
+        matched_words = []
+        for kw, weight in keywords_with_weight:
+            if kw in doc:
+                keyword_boost += weight * 0.5
+                matched_words.append(kw)
+        
+        final_score = base_score + keyword_boost
+        return {
+            "content": doc,
+            "metadata": meta,
+            "score": final_score,
+            "debug": f"基准:{base_score:.2f} + 补偿:{keyword_boost:.2f} (匹配:{matched_words})"
+        }
+    
     # ================= 对话历史管理 =================
     
     def load_history(self) -> dict:

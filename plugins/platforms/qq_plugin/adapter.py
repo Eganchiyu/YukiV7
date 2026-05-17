@@ -182,52 +182,64 @@ class QQPlugin(PlatformPlugin):
     
     async def _process_buffer(self, group_id: int):
         """防抖到期后处理缓冲消息"""
+        import asyncio as _asyncio  # 防御性导入
         gid_str = str(group_id)
         
-        await asyncio.sleep(self._real_time_debounce)
-        self._real_time_debounce = self.debounce_time
+        try:
+            await _asyncio.sleep(self._real_time_debounce)
+            self._real_time_debounce = self.debounce_time
+            
+            # 群开关再次检查
+            if not self.group_manager.is_active(gid_str):
+                self._buffers.pop(gid_str, None)
+                return
+            
+            buffered = self._buffers.pop(gid_str, [])
+            if not buffered:
+                return
+            
+            # 合并所有消息
+            combined_text = "\n".join(m["content"] for m in buffered)
+            
+            # CQ码解析 — 对齐 YukiV6 parser.parse_all_cq_codes()
+            if self.parser:
+                combined_text = await self.parser.parse_all(combined_text)
+            combined_text = combined_text.replace("\n", " ").strip()
+            
+            # 找到第一个非 bot 的发送者作为主发送者
+            main_sender = next(
+                (m for m in buffered if not m["is_bot"]),
+                buffered[0]
+            )
+            
+            # 构建事件
+            event = PlatformEvent(
+                source="qq",
+                event_type="message",
+                content=combined_text,
+                user_id=str(main_sender["user_id"]),
+                user_name=main_sender["name"],
+                session_id=gid_str,
+                session_type="group",
+                timestamp=time.time(),
+                metadata={
+                    "group_id": group_id,
+                    "sender_name": main_sender["name"],
+                    "is_fake": main_sender["name"].endswith("(冒充)"),
+                    "message_count": len(buffered),
+                },
+            )
+            
+            # 通过 bus 处理
+            if self.bus:
+                response = await self.bus.receive(event)
+                if response and response.text:
+                    await self.send(event, response)
         
-        # 群开关再次检查
-        if not self.group_manager.is_active(gid_str):
-            self._buffers.pop(gid_str, None)
-            return
-        
-        buffered = self._buffers.pop(gid_str, [])
-        if not buffered:
-            return
-        
-        # 合并所有消息
-        combined_text = "\n".join(m["content"] for m in buffered)
-        
-        # 找到第一个非 bot 的发送者作为主发送者
-        main_sender = next(
-            (m for m in buffered if not m["is_bot"]),
-            buffered[0]
-        )
-        
-        # 构建事件
-        event = PlatformEvent(
-            source="qq",
-            event_type="message",
-            content=combined_text,
-            user_id=str(main_sender["user_id"]),
-            user_name=main_sender["name"],
-            session_id=gid_str,
-            session_type="group",
-            timestamp=time.time(),
-            metadata={
-                "group_id": group_id,
-                "sender_name": main_sender["name"],
-                "is_fake": main_sender["name"].endswith("(冒充)"),
-                "message_count": len(buffered),
-            },
-        )
-        
-        # 通过 bus 发送（由 bus 的 _listen_platform 接收）
-        if self.bus:
-            response = await self.bus.receive(event)
-            if response and response.text:
-                await self.send(event, response)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"[QQ] 缓冲处理异常: {e}")
     
     async def send(self, event: PlatformEvent, response: YukiResponse) -> bool:
         """发送回复到 QQ"""

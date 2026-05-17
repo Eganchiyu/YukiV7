@@ -13,6 +13,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from yuki_core.logger import setup_logging
+setup_logging(debug=True)
+
 from yuki_core.config import cfg
 from yuki_core import (
     YukiIdentity, YukiMind, ContextBus,

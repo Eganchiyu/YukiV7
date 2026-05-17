@@ -297,7 +297,7 @@ class ContextBus:
             self.memory.remember(diary, session_id=session_id, source="diary")
         
         # 裁剪历史
-        kept = [m for m in history if m.get("role") == "system"] + dialogue_msgs[-cfg.KEEP_LAST_DIALOGUE:]
+        kept = [m for m in history if m.get("role") == "system"] + dialogue_msgs[-self.config.KEEP_LAST_DIALOGUE:]
         history_data = self.history.load()
         history_data[session_id] = kept
         self.history.save(history_data)

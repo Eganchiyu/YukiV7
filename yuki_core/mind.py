@@ -325,55 +325,70 @@ class YukiMind:
         memory=None,
     ) -> list[dict]:
         """
-        构建 LLM 上下文
+        构建 LLM 上下文 —— 严格对齐 YukiV6 build_chat_context
         
         结构: system_prompt + [RAG回忆] + 近期对话 + 当前消息
         """
         session_id = event.session_id
-        messages = []
+        combined_text = event.content
+        history_dict = history_manager.load() if history_manager else {}
         
-        # 1. System Prompt
-        platform = event.source
-        system_prompt = self.identity.get_system_prompt(platform)
-        messages.append({"role": "system", "content": system_prompt})
+        # 1. 基础人设 — 优先从历史记录取，保证与启动时一致
+        chat_history = history_dict.get(session_id, [])
+        if chat_history and chat_history[0].get("role") == "system":
+            system_prompt = chat_history[0]["content"]
+        else:
+            system_prompt = self.identity.get_system_prompt(event.source)
+        messages = [{"role": "system", "content": system_prompt}]
         
-        # 2. RAG 记忆
+        # 2. RAG 检索日记 — 对齐 YukiV6 search_diaries 参数
         if memory:
             try:
-                diaries = memory.recall(event.content, session_id=session_id, limit=8)
-                for entry in reversed(diaries):
-                    content = entry.content.replace('\n', ' ')
+                # dynamic_top_k: 长消息多检索
+                dynamic_top_k = 10 if len(combined_text) > 100 else 8
+                relevant_diaries = memory.search_diaries(
+                    combined_text, session_id=session_id, top_k=dynamic_top_k
+                )
+                # reversed: 最旧的在前，最新的在后（与 YukiV6 一致）
+                for diary_obj in reversed(relevant_diaries):
+                    content = diary_obj['content']
                     messages.append({"role": "system", "content": f"【回忆】{content}"})
+                
+                # 调试输出 — 打印完整日记内容
+                for i, diary_obj in enumerate(relevant_diaries, 1):
+                    content_preview = diary_obj['content'].replace('\n', ' ')[:120]
+                    logger.info(
+                        f"[RAG] 回忆#{i} 得分:{diary_obj['score']:.2f} | {content_preview}..."
+                    )
+                    logger.debug(f"[RAG]   详情: {diary_obj.get('debug', '')}")
+                logger.info(f"[RAG] 共检索到 {len(relevant_diaries)} 条日记")
             except Exception as e:
                 logger.warning(f"[Mind] RAG 检索失败: {e}")
         
-        # 3. 近期对话（从历史记录）
-        if history_manager:
-            history = history_manager.load()
-            chat_history = history.get(session_id, [])
+        # 3. 近期对话 — 对齐 YukiV6 的切片和时间处理
+        if chat_history:
+            # [-KEEP_LAST_DIALOGUE - 1 : -1] : 排除最后一条(当前消息)，取最近 N 条
+            keep = 10  # KEEP_LAST_DIALOGUE
+            recent_raw = chat_history[-keep - 1:-1] if len(chat_history) > 1 else []
+            recent_raw = [m for m in recent_raw if m.get("role") != "system"]
             
-            # 取 system prompt 之后的消息
-            non_system = [m for m in chat_history if m.get("role") != "system"]
-            
-            # 保留最近 N 条
-            keep = 10
-            recent = non_system[-keep:] if len(non_system) > keep else non_system
-            
-            for msg in recent:
+            for msg in recent_raw:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
-                time_str = msg.get("time", "")
+                msg_time = msg.get("time", "")
                 
-                if role == "user" and time_str:
-                    content = f"【时间：{time_str}】{content}"
+                if msg_time:
+                    if role == "user":
+                        content = f"【时间：{msg_time}】{content}"
+                    # assistant 消息保持原样
                 
                 messages.append({"role": role, "content": content})
         
-        # 4. 当前消息
+        # 4. 当前消息 — 对齐 YukiV6 格式
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         messages.append({
             "role": "user",
-            "content": f"(当前时间:{current_time}){event.content}"
+            "content": f" (当前时间:{current_time}){combined_text}"
         })
         
         return messages
