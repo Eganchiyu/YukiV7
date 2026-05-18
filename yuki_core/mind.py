@@ -28,8 +28,8 @@ class YukiMind:
     """
     Yuki 决策引擎（精简版）
 
-    处理事件 → 构建上下文 → LLM生成 → 解析标签 → 返回
-    不包含精力/欲望等业务逻辑，由插件层决定是否调用
+    处理事件 → 构建上下文 → decide_to_reply → LLM生成 → 解析标签 → 返回
+    不包含精力/欲望等业务逻辑，由插件层提供预计算值
     """
 
     def __init__(self, identity: YukiIdentity = None, keep_last_dialogue: int = 10):
@@ -43,15 +43,18 @@ class YukiMind:
         llm_caller=None,
         history_manager=None,
         memory=None,
-    ) -> YukiResponse:
+        decide_to_reply_fn=None,
+    ) -> Optional[YukiResponse]:
         """
         处理一个事件
 
         Args:
-            event: 平台事件
+            event: 平台事件（metadata 中可包含 pre_filter 信息）
             llm_caller: LLM 调用函数 async fn(messages, **kwargs) -> str
             history_manager: HistoryManager 实例
             memory: YukiMemory 实例（RAG）
+            decide_to_reply_fn: 可选的判定函数 async fn(event, context) -> bool
+                               如果提供，在 LLM 回复前先调用判断是否应该回复
         """
         session_id = event.session_id
 
@@ -64,14 +67,31 @@ class YukiMind:
                 metadata={"decision": "no_llm_caller"}
             )
 
-        # 2. 构建上下文
+        # 2. 构建上下文（含 RAG + 历史）
         context = await self._build_context(event, history_manager, memory)
 
-        # 3. 调用 LLM
+        # 3. decide_to_reply（如果提供了判定函数）
+        if decide_to_reply_fn:
+            try:
+                should_reply = await decide_to_reply_fn(event, context)
+                if not should_reply:
+                    # 保存历史（即使不回复，用户消息也应记录）
+                    if history_manager:
+                        current_time = event.time_str
+                        history_manager.append_message(
+                            session_id, "user", event.content, current_time
+                        )
+                    logger.debug(f"[Mind] {session_id} 决定不回复")
+                    return None
+            except Exception as e:
+                logger.error(f"[Mind] decide_to_reply 异常: {e}")
+                return None
+
+        # 4. 调用 LLM
         logger.info(f"[Mind] {session_id} 正在打字...")
         response_text = await llm_caller(context)
 
-        # 4. 解析特殊标签
+        # 5. 解析特殊标签
         actions = []
         clean_text = response_text
 
@@ -113,7 +133,7 @@ class YukiMind:
         if not clean_text and not actions:
             clean_text = "..."  # 防止空回复
 
-        # 5. 记录到历史
+        # 6. 记录到历史
         if history_manager:
             current_time = event.time_str
             history_manager.append_message(session_id, "user", event.content, current_time)
@@ -147,7 +167,9 @@ class YukiMind:
         if chat_history and chat_history[0].get("role") == "system":
             system_prompt = chat_history[0]["content"]
         else:
-            system_prompt = self.identity.get_system_prompt(event.source)
+            # 使用 V7 identity 生成 system prompt
+            platform = event.source or "qq"
+            system_prompt = self.identity.get_system_prompt(platform)
         messages = [{"role": "system", "content": system_prompt}]
 
         # 2. RAG 检索日记 — 对齐 YukiV6 search_diaries 参数

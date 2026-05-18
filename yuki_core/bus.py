@@ -226,9 +226,9 @@ class ContextBus:
         流程:
           1. 校验事件
           2. 追踪消息时间
-          3. 防 bot 自环
-          4. 注入身份上下文
-          5. Mind 处理
+          3. 注入身份上下文
+          4. 构建 decide_to_reply_fn（从 event.metadata 获取预计算值）
+          5. Mind 处理（含 decide_to_reply + LLM 生成）
           6. 执行 actions
           7. 记录日志 + 计时
         """
@@ -245,12 +245,7 @@ class ContextBus:
             f"{event.user_name}: {event.content[:60]}"
         )
 
-        # 3. V6 decide_to_reply 逻辑（防 bot 无限套娃）
-        if not self._decide_to_reply(event):
-            logger.debug(f"[Bus] 跳过 (bot 防环)")
-            return None
-
-        # 4. 注入身份上下文
+        # 3. 注入身份上下文
         platform_identity = self.identity.get_platform_identity(event.source)
         event.identity_context = {
             "platform_prompt": platform_identity.context_prompt,
@@ -258,12 +253,17 @@ class ContextBus:
             "style_override": platform_identity.style_override,
         }
 
+        # 4. 构建 decide_to_reply_fn
+        #    从 event.metadata 获取 QQPlugin 预计算的值
+        decide_to_reply_fn = self._make_decide_to_reply(event)
+
         # 5. 交给 Mind 处理
         response = await self.mind.process(
             event,
             llm_caller=self._llm_caller,
             history_manager=self.history,
             memory=self.memory,
+            decide_to_reply_fn=decide_to_reply_fn,
         )
 
         # 6. 执行行动（能力插件调用等）
@@ -297,44 +297,100 @@ class ContextBus:
             event.session_id = event.metadata.get("group_id") or event.user_id
         return True
 
-    # ================= V6 decide_to_reply =================
+    # ================= decide_to_reply =================
 
-    def _decide_to_reply(self, event: PlatformEvent) -> bool:
+    def _make_decide_to_reply(self, event: PlatformEvent):
         """
-        V6 逻辑：判断是否应该回复
+        构建 decide_to_reply 函数。
 
-        - 有人类 @Yuki → 强制回复
-        - 仅 BOT @Yuki → 欲望打折，跳过回复（防无限套娃）
-        - 无 @Yuki → 正常回复（由 mind 的活跃度系统决定）
+        从 event.metadata 获取 QQPlugin 预计算的值：
+        - pre_filter.force_reply: 被直接召唤
+        - pre_filter.human_calling: 人类在召唤
+        - pre_filter.bot_calling_only: 仅 BOT 召唤
+        - pre_filter.desire: 欲望值
+        - pre_filter.energy: 精力值
+        - pre_filter.keywords: 关键词列表
+        - pre_filter.robot_name: 机器人名字
 
-        多重检测:
-          1. metadata.is_bot 字段（由 plugin 设置）
-          2. sender.role == "bot"（NapCat 标准字段）
-          3. 发送者名字匹配已知 bot 名
+        流程:
+          1. force_reply → 回复
+          2. human_calling → 回复
+          3. bot_calling_only → 欲望打折
+          4. desire >= 80 → 回复
+          5. desire <= 30 → 拒绝
+          6. energy < MIN_ACTIVE → 拒绝
+          7. LLM 判断 (YES/NO)
         """
-        content = (event.metadata.get("raw_message") or event.content or "").lower()
-        keywords = (self.config.KEYWORDS if self.config else []) + ["yuki"]
+        meta = event.metadata.get("pre_filter", {})
+        if not meta:
+            # 没有预计算值，直接放行（让 Mind 自行判断）
+            return None
 
-        is_calling = any(kw.lower() in content for kw in keywords)
-        if not is_calling:
-            return True  # 没被召唤，交给 mind 正常判断
+        force_reply = meta.get("force_reply", False)
+        human_calling = meta.get("human_calling", False)
+        bot_calling_only = meta.get("bot_calling_only", False)
+        desire = meta.get("desire", 50.0)
+        energy = meta.get("energy", 50.0)
+        keywords = meta.get("keywords", [])
+        robot_name = meta.get("robot_name", "Yuki")
 
-        # 被召唤了，检查是否只有 BOT 在召唤
-        raw = event.metadata.get("raw", {})
-        sender = raw.get("sender", {})
+        if force_reply or human_calling:
+            return None  # 直接放行，不需要 LLM 判断
 
-        # 多重 bot 检测
-        is_bot = (
-            event.metadata.get("is_bot", False)          # plugin 显式标记
-            or sender.get("role") == "bot"               # NapCat bot 角色
-            or sender.get("bot_id") is not None          # NapCat bot_id 字段
-        )
+        if bot_calling_only:
+            desire *= 0.7
 
-        if is_bot:
-            logger.info(f"[Bus] 检测到 BOT 召唤 Yuki，欲望打折跳过")
-            return False
+        if desire >= 80:
+            return None  # 放行
+        if desire <= 30:
+            # 拒绝
+            async def reject(_event, _context):
+                return False
+            return reject
 
-        return True
+        if energy < (self.config.MIN_ACTIVE_ENERGY if self.config else 25):
+            async def tired(_event, _context):
+                return False
+            return tired
+
+        # 中间地带：LLM 判断
+        async def llm_decide(event_obj, context):
+            """用 LLM 判断是否应该回复"""
+            try:
+                recent_dialogue = [msg for msg in context if msg.get("role") != "system"][-10:]
+                dialogue_text = ""
+                for msg in recent_dialogue:
+                    role_name = "" if msg["role"] == "user" else f"【{robot_name}】说:"
+                    dialogue_text += f"{role_name}{msg['content']}\n\n"
+
+                energy_desc = (
+                    "精力充沛" if energy > 90 else
+                    "精力正常" if energy > 45 else
+                    "疲惫" if energy > 25 else
+                    "非常疲惫"
+                )
+
+                check_messages = [
+                    {"role": "system", "content": context[0]["content"] + "\n你现在需要根据精力值和氛围决定是否发言。"},
+                    {"role": "user", "content": (
+                        f"--- 观察背景 ---\n最近对话：\n{dialogue_text}\n\n"
+                        f"--- 自身状态 ---\n精力值：{energy:.1f}/100 ({energy_desc})\n\n"
+                        f"--- 决策指令 ---\n请分析对话上下文，判断{robot_name}是否应该发言。回答 YES 或 NO。"
+                    )},
+                ]
+
+                result = await self._llm_caller(
+                    messages=check_messages,
+                    max_tokens=10,
+                    temperature=0.6
+                )
+                return "YES" in result.upper()
+
+            except Exception as e:
+                logger.error(f"[decide_to_reply] LLM 判断失败: {e}")
+                return False
+
+        return llm_decide
 
     # ================= LLM 调用器 =================
 

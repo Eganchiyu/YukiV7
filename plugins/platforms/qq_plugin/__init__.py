@@ -44,7 +44,7 @@ class QQPlugin(PlatformPlugin):
 
     name = "QQ Bot"
     platform_id = "qq"
-    version = "0.1.0"
+    version = "0.2.0"
 
     def __init__(self, **config):
         super().__init__(**config)
@@ -107,7 +107,7 @@ class QQPlugin(PlatformPlugin):
         # 同步系统提示词
         sync_system_prompts(self.history_manager, self.yuki)
 
-        # V6 引擎
+        # V6 引擎（用于后台任务：日记、破冰、小女仆）
         self.engine = YukiEngine(
             self.memory_rag, self.history_manager, self.yuki, self.sender
         )
@@ -159,6 +159,7 @@ class QQPlugin(PlatformPlugin):
         监听 NapCat WebSocket，缓冲防抖，预处理后 yield PlatformEvent。
 
         保留 V6 的防抖、buffer、图片理解、CQ 码解析、开关拦截逻辑。
+        不做 decide_to_reply 和 history 加载 — 这些交给 Mind 处理。
         """
         # 启动后台任务
         self._start_background_tasks()
@@ -296,8 +297,9 @@ class QQPlugin(PlatformPlugin):
 
     async def _main_process(self, chat_id, mode):
         """
-        V6 main_process 逻辑：防抖等待 → 预处理 → decide_to_reply → yield PlatformEvent。
-        处理完后将 PlatformEvent 放入 _event_queue。
+        V6 main_process 逻辑：防抖等待 → 预处理 → 计算预过滤值 → yield PlatformEvent。
+
+        不再做 decide_to_reply 和 history 加载 — 这些交给 Mind。
         """
         await asyncio.sleep(self._real_time_debounce)
         self._real_time_debounce = self.debounce_time
@@ -335,37 +337,30 @@ class QQPlugin(PlatformPlugin):
 
         logger.info(f"[{chat_id}] 收到消息: {combined_text[:80]}")
 
-        # 记录到历史日志
+        # 记录到日志（不修改 history，history 由 Mind 管理）
         self.history_manager.append_to_log(chat_id, "User/Group", combined_text)
 
-        # 加载历史并注入系统提示词
-        history_dict = self.history_manager.load()
+        # === 计算预过滤值（供 Mind 的 decide_to_reply 使用） ===
         cid_str = str(chat_id)
-        if cid_str not in history_dict or not history_dict[cid_str]:
-            history_dict[cid_str] = [{"role": "system", "content": self.yuki.get_setting(mode)}]
-        elif history_dict[cid_str][0].get("role") != "system":
-            history_dict[cid_str].insert(0, {"role": "system", "content": self.yuki.get_setting(mode)})
+        current_e = self.yuki.update_energy(chat_id)
+        self.yuki.update_desire_to_reply(chat_id)
+        desire = self.yuki.desire_to_start_topic.get(cid_str, 0)
 
-        # 追加当前消息到历史
-        current_time_str = datetime.datetime.now().strftime("%Y年%m月%d日%H:%M")
-        history_dict[cid_str].append({
-            "role": "user",
-            "content": combined_text,
-            "time": current_time_str,
-        })
-
-        # decide_to_reply（精力/欲望 + LLM 判断）
         force_reply = self.robot_name.lower() in combined_text.lower()
-        if mode == "group":
-            should_reply = await self._decide_to_reply(
-                history_dict[cid_str], message_objs, chat_id, force_reply
-            )
-            if not should_reply:
-                self.history_manager.save(history_dict)
-                logger.info(f"[{chat_id}] {cfg.ROBOT_NAME.title()} 决定继续潜水...")
-                return
 
-        # 构造 PlatformEvent
+        human_calling = any(
+            not m["is_bot"] and any(kw in m["raw_text"].lower() for kw in self.keywords)
+            for m in message_objs
+        )
+
+        bot_calling_only = False
+        if not human_calling:
+            bot_calling_only = all(
+                m["is_bot"] for m in message_objs
+                if any(kw in m["raw_text"].lower() for kw in self.keywords)
+            )
+
+        # 构造 PlatformEvent（不含 history，Mind 会自行加载）
         event = PlatformEvent(
             source="qq",
             event_type="message",
@@ -379,76 +374,20 @@ class QQPlugin(PlatformPlugin):
                 "sender_name": message_objs[-1].get("name", ""),
                 "is_bot": message_objs[-1].get("is_bot", False),
                 "group_id": chat_id if mode == "group" else None,
-                "history_dict_snapshot": history_dict,  # 供 Mind 使用
+                # 预过滤值（供 Mind 的 decide_to_reply 使用）
+                "pre_filter": {
+                    "force_reply": force_reply,
+                    "human_calling": human_calling,
+                    "bot_calling_only": bot_calling_only,
+                    "desire": desire,
+                    "energy": current_e,
+                    "keywords": self.keywords,
+                    "robot_name": self.robot_name,
+                },
             },
         )
 
         await self._event_queue.put(event)
-
-    # ================= decide_to_reply =================
-
-    async def _decide_to_reply(self, history, message_objs, chat_id, force_reply=False):
-        """V6 decide_to_reply 逻辑：精力/欲望 + LLM 判断"""
-        current_e = self.yuki.update_energy(chat_id)
-        self.yuki.update_desire_to_reply(chat_id)
-        desire = self.yuki.desire_to_start_topic.get(str(chat_id), 0)
-
-        if force_reply:
-            return True
-
-        # 人类召唤
-        human_calling = any(
-            not m["is_bot"] and any(kw in m["raw_text"].lower() for kw in self.keywords)
-            for m in message_objs
-        )
-        if human_calling:
-            return True
-
-        # 仅 BOT 召唤 → 欲望打折
-        bot_calling_only = all(
-            m["is_bot"] for m in message_objs
-            if any(kw in m["raw_text"].lower() for kw in self.keywords)
-        )
-        if bot_calling_only:
-            desire *= 0.7
-
-        if desire >= 80:
-            return True
-        if desire <= 30:
-            return False
-        if current_e < cfg.MIN_ACTIVE_ENERGY:
-            return False
-
-        # LLM 判断
-        try:
-            recent_dialogue = [msg for msg in history if msg.get("role") != "system"][-10:]
-            dialogue_text = ""
-            for msg in recent_dialogue:
-                role_name = "" if msg["role"] == "user" else f"【{cfg.ROBOT_NAME.title()}】说:"
-                dialogue_text += f"{role_name}{msg['content']}\n\n"
-
-            energy_desc = (
-                "精力充沛" if current_e > 90 else
-                "精力正常" if current_e > 45 else
-                "疲惫" if current_e > 25 else
-                "非常疲惫"
-            )
-
-            messages = [
-                {"role": "system", "content": f"{self.yuki.get_setting('group')}\n你现在需要根据精力值和氛围决定是否发言。"},
-                {"role": "user", "content": (
-                    f"--- 观察背景 ---\n最近对话：\n{dialogue_text}\n\n"
-                    f"--- 自身状态 ---\n精力值：{current_e:.1f}/100 ({energy_desc})\n\n"
-                    f"--- 决策指令 ---\n请分析对话上下文，判断{cfg.ROBOT_NAME}是否应该发言。回答 YES 或 NO。"
-                )},
-            ]
-
-            result = await yuki_chat(messages=messages, max_tokens=10, temperature=0.6)
-            return "YES" in result.upper()
-
-        except Exception as e:
-            logger.error(f"[decide_to_reply] 判断失败: {e}")
-            return False
 
     # ================= 群聊命令 =================
 
@@ -490,6 +429,31 @@ class QQPlugin(PlatformPlugin):
             if any(fw in raw_msg for fw in feedback_words):
                 meme_id = self.yuki.last_sent_meme.pop(gid_str)
                 self.sticker_manager.add_preference(meme_id)
+
+    # ================= 私聊处理 =================
+
+    async def _process_private_message(self, user_id, raw_msg):
+        """处理私聊消息"""
+        content = f'【"主人"】说: {raw_msg}'
+        content = smart_truncate(content, max_len=self.max_message_length)
+
+        # 入队
+        if user_id not in self.yuki.message_buffer:
+            self.yuki.message_buffer[user_id] = []
+        self.yuki.message_buffer[user_id].append({
+            "name": self.master_name,
+            "content": content,
+            "raw_text": raw_msg,
+            "is_bot": False,
+        })
+
+        # 取消旧任务
+        if user_id in self.yuki.buffer_tasks:
+            self.yuki.buffer_tasks[user_id].cancel()
+        self.yuki.buffer_tasks[user_id] = asyncio.create_task(
+            self._main_process(user_id, "private")
+        )
+        return None
 
     # ================= 群开关状态 =================
 

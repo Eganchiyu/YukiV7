@@ -34,26 +34,20 @@ class BotConnector:
         return urlunparse(parsed._replace(query=new_query))
 
     async def ensure_connection(self):
-        """最兼容的版本判断：确保返回一个真正 OPEN 的连接"""
+        """确保返回一个真正 OPEN 的连接（兼容 websockets 12.x ~ 16.x）"""
         async with self._lock:
-            # 使用 hasattr 进行安全检查，或者直接判断对象是否存在
-            # 核心逻辑：如果对象不存在，或者对象的状态不是 OPEN (1)
             is_alive = False
             if self.websocket is not None:
                 try:
-                    # websockets 库最通用的检查方式是查看其 protocol 状态机
-                    # 或者直接检查 connection 状态
-                    from websockets.protocol import State
-                    is_alive = self.websocket.state == State.OPEN
-                except Exception:
-                    # 如果找不到 State 枚举，回退到最原始的尝试
-                    try:
+                    # websockets 16.x: ClientConnection 有 .open / .closed 属性
+                    # websockets 12-14: 同样有 .open / .closed
+                    # 最安全的跨版本检测：优先 .open，回退 .closed
+                    if hasattr(self.websocket, 'open'):
+                        is_alive = self.websocket.open
+                    elif hasattr(self.websocket, 'closed'):
                         is_alive = not self.websocket.closed
-                    except AttributeError:
-                        try:
-                            is_alive = self.websocket.open
-                        except AttributeError:
-                            is_alive = False  # 属性全无，视为失效
+                except Exception:
+                    is_alive = False
 
             if not is_alive:
                 if self.websocket is not None:
