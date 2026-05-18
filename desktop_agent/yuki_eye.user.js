@@ -135,6 +135,8 @@
         selector: selector,
         rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
         state: getElementState(el),
+        // 新增：父元素上下文，帮助 LLM 理解匿名元素
+        context: getElementContext(el),
       });
 
       if (elements.length >= MAX_ELEMENTS) break;
@@ -225,9 +227,120 @@
     return s.length ? s : null;
   }
 
+  /**
+   * 获取元素的上下文信息：
+   * - 父容器的文本（帮助理解匿名元素在什么区域）
+   * - aria / title / alt 等无障碍属性
+   * - 附近兄弟元素的文本
+   */
+  function getElementContext(el) {
+    const parts = [];
+
+    // 1) 无障碍属性（优先级最高）
+    const ariaLabel = el.getAttribute('aria-label');
+    const title = el.getAttribute('title');
+    const alt = el.getAttribute('alt');
+    if (ariaLabel) parts.push('aria-label="' + ariaLabel + '"');
+    if (title) parts.push('title="' + title + '"');
+    if (alt) parts.push('alt="' + alt + '"');
+
+    // 2) 最近的有文本的父容器（往上找3层）
+    let parent = el.parentElement;
+    for (let i = 0; i < 3 && parent && parent !== document.body; i++) {
+      const parentText = cleanText(parent);
+      if (parentText && parentText.length > 2 && parentText.length < 200) {
+        parts.push('in: "' + parentText.slice(0, 120) + '"');
+        break;
+      }
+      parent = parent.parentElement;
+    }
+
+    // 3) 前一个兄弟的文本（常见模式：文字 + 按钮）
+    const prev = el.previousElementSibling;
+    if (prev) {
+      const prevText = cleanText(prev);
+      if (prevText && prevText.length < 80) {
+        parts.push('before: "' + prevText + '"');
+      }
+    }
+
+    return parts.length > 0 ? parts.join(' | ') : null;
+  }
+
   function cleanText(el) {
     let t = el.innerText || el.value || el.textContent || '';
-    return t.replace(/[\n\r\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+    t = t.replace(/[\n\r\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+    // 如果文本为空，尝试从 SVG 图标推断含义
+    if (!t) {
+      const svg = el.querySelector('svg') || (el.tagName === 'SVG' ? el : null);
+      if (svg) {
+        t = identifySvgIcon(svg);
+      }
+    }
+
+    return t;
+  }
+
+  /**
+   * 通过 SVG path 的几何特征识别常见图标
+   */
+  function identifySvgIcon(svg) {
+    // 先检查无障碍属性
+    const label = svg.getAttribute('aria-label') || svg.getAttribute('title') ||
+                  svg.closest('[aria-label]')?.getAttribute('aria-label');
+    if (label) return `[${label}]`;
+
+    // 获取所有 path 的 d 属性
+    const paths = svg.querySelectorAll('path');
+    const allD = Array.from(paths).map(p => p.getAttribute('d') || '').join(' ');
+
+    // 统计特征
+    const pathCount = paths.length;
+    const hasLine = /[ML]\s*\d/.test(allD);
+    const dLen = allD.length;
+
+    // 简单启发式识别
+    // X/关闭：通常2条交叉线，path较短
+    if (pathCount <= 3 && dLen < 200) {
+      // 检查是否有两条近似交叉的线
+      const coords = allD.match(/[\d.]+/g)?.map(Number) || [];
+      if (coords.length >= 8) {
+        // 取前两段的起点终点，看是否形成 X
+        const x1 = coords[0], y1 = coords[1];
+        const x2 = coords[2], y2 = coords[3];
+        const x3 = coords[4], y3 = coords[5];
+        const x4 = coords[6], y4 = coords[7];
+        // X 形状：两线交叉
+        if (Math.abs((x2-x1)*(y4-y3) - (y2-y1)*(x4-x3)) < 500) {
+          return '[✕]';
+        }
+      }
+    }
+
+    // 搜索：放大镜通常是圆+线
+    if (pathCount <= 3 && dLen < 300 && /a|A/.test(allD)) {
+      return '[🔍]';
+    }
+
+    // 箭头：通常是三角形或 V 形
+    if (pathCount <= 2 && dLen < 150) {
+      const coords = allD.match(/[\d.]+/g)?.map(Number) || [];
+      if (coords.length >= 6) {
+        // 检查是否像箭头（开口三角形）
+        const spread = Math.max(...coords.filter((_, i) => i % 2 === 0)) -
+                       Math.min(...coords.filter((_, i) => i % 2 === 0));
+        if (spread > 10 && spread < 50) return '[→]';
+      }
+    }
+
+    // 菜单（三条横线）
+    if (pathCount === 3 && dLen < 300) {
+      return '[☰]';
+    }
+
+    // 无法识别
+    return `[icon:${pathCount}p]`;
   }
 
   // ==================== 快照 ====================

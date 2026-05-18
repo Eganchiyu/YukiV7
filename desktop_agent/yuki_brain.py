@@ -63,6 +63,12 @@ def print_page_state(snapshot):
         state = ''
         if el.get('state'):
             state = f" [{', '.join(el['state'])}]"
+        # 显示上下文（如果有）
+        ctx = el.get('context', '')
+        if ctx:
+            if len(ctx) > 50:
+                ctx = ctx[:47] + '...'
+            ctx = f"  \033[90m({ctx})\033[0m"
         text = el.get('text', '') or el.get('placeholder', '') or el.get('href', '') or ''
         if not text:
             text = f"<{el.get('tag', '?')}>"
@@ -73,7 +79,7 @@ def print_page_state(snapshot):
             tag_extra = f":{tag_extra}"
         else:
             tag_extra = ''
-        print(f"  {el['id']:>3}  {icon}  {el['tag']}{tag_extra:8s}  {text}{state}")
+        print(f"  {el['id']:>3}  {icon}  {el['tag']}{tag_extra:8s}  {text}{state}{ctx}")
 
     print(f"{'─' * 60}")
     print(f"  click <id> | type <id> <text> | scroll | scan | open <url> | list | quit")
