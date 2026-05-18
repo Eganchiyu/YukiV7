@@ -153,45 +153,66 @@
     return true;
   }
 
+  // 检查类名是否是合法的 CSS 选择器片段
+  function isValidClassName(c) {
+    // 只允许字母数字下划线连字符，不允许括号方括号等
+    return /^[a-zA-Z_-][a-zA-Z0-9_-]*$/.test(c);
+  }
+
   function generateSelector(el) {
+    // 1) id
     if (el.id && /^[a-zA-Z][\w-]*$/.test(el.id)) {
-      if (document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) {
-        return '#' + CSS.escape(el.id);
-      }
+      try {
+        if (document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) {
+          return '#' + CSS.escape(el.id);
+        }
+      } catch {}
     }
+    // 2) data-testid
     for (const attr of ['data-testid', 'data-cy', 'data-qa']) {
       const val = el.getAttribute(attr);
       if (val) return `[${attr}="${val}"]`;
     }
+    // 3) name in form
     if (el.name) {
-      const scope = el.closest('form') || document;
-      if (scope.querySelectorAll('[name="' + el.name + '"]').length === 1) {
-        return el.tagName.toLowerCase() + '[name="' + el.name + '"]';
-      }
+      try {
+        const scope = el.closest('form') || document;
+        if (scope.querySelectorAll('[name="' + CSS.escape(el.name) + '"]').length === 1) {
+          return el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]';
+        }
+      } catch {}
     }
-    if (el.getAttribute('aria-label')) {
-      const sel = el.tagName.toLowerCase() + '[aria-label="' + el.getAttribute('aria-label') + '"]';
-      if (document.querySelectorAll(sel).length === 1) return sel;
+    // 4) aria-label
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) {
+      try {
+        const sel = el.tagName.toLowerCase() + '[aria-label="' + CSS.escape(ariaLabel) + '"]';
+        if (document.querySelectorAll(sel).length === 1) return sel;
+      } catch {}
     }
+    // 5) nth-child path（带 try-catch 兜底）
     const path = [];
     let cur = el;
-    while (cur && cur !== document.body && cur !== document.documentElement) {
-      let seg = cur.tagName.toLowerCase();
-      if (cur.className && typeof cur.className === 'string') {
-        const cls = cur.className.trim().split(/\s+/)
-          .filter(c => /^[a-zA-Z_-]/.test(c) && c.length < 30 && !/^sc-/.test(c))
-          .slice(0, 2);
-        if (cls.length) seg += '.' + cls.join('.');
+    try {
+      while (cur && cur !== document.body && cur !== document.documentElement) {
+        let seg = cur.tagName.toLowerCase();
+        if (cur.className && typeof cur.className === 'string') {
+          const cls = cur.className.trim().split(/\s+/)
+            .filter(c => isValidClassName(c) && c.length < 30)
+            .slice(0, 2);
+          if (cls.length) seg += '.' + cls.join('.');
+        }
+        const parent = cur.parentElement;
+        if (parent) {
+          const sibs = Array.from(parent.children).filter(c => c.tagName === cur.tagName);
+          if (sibs.length > 1) seg += ':nth-child(' + (sibs.indexOf(cur) + 1) + ')';
+        }
+        path.unshift(seg);
+        const candidate = path.join(' > ');
+        if (document.querySelectorAll(candidate).length === 1) break;
+        cur = cur.parentElement;
       }
-      const parent = cur.parentElement;
-      if (parent) {
-        const sibs = Array.from(parent.children).filter(c => c.tagName === cur.tagName);
-        if (sibs.length > 1) seg += ':nth-child(' + (sibs.indexOf(cur) + 1) + ')';
-      }
-      path.unshift(seg);
-      if (document.querySelectorAll(path.join(' > ')).length === 1) break;
-      cur = cur.parentElement;
-    }
+    } catch {}
     return path.join(' > ') || null;
   }
 
