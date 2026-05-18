@@ -64,9 +64,9 @@ class HistoryManager:
                     os.remove(temp_file)
     
     def get_chat(self, session_id: str) -> list:
-        """获取某个会话的历史"""
+        """获取某个会话的历史（返回副本，防止外部修改污染缓存）"""
         data = self.load()
-        return data.get(str(session_id), [])
+        return list(data.get(str(session_id), []))
     
     def append_message(self, session_id: str, role: str, content: str, time_str: str = None):
         """追加一条消息"""

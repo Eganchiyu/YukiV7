@@ -8,8 +8,10 @@ Yuki 小女仆系统
 import json
 import os
 import re
+import sys
 import asyncio
 import subprocess
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -18,7 +20,6 @@ from .models import Action
 try:
     from utils.logger import get_logger
 except ImportError:
-    import logging
     def get_logger(name):
         return logging.getLogger(name)
 
@@ -26,12 +27,55 @@ logger = get_logger("maid")
 
 
 # 配置
-SKILLS_DIR = Path("skills")
-TASKS_DIR = Path("tasks")
+SKILLS_DIR = Path("skills").resolve()
+TASKS_DIR = Path("tasks").resolve()
 
 # 确保目录存在
 SKILLS_DIR.mkdir(exist_ok=True)
 TASKS_DIR.mkdir(exist_ok=True)
+
+# 安装包白名单（空=允许所有，或填入允许的包名）
+_ALLOWED_PACKAGES: set[str] = set()
+
+
+def _validate_skill_name(name: str) -> Path | None:
+    """
+    校验技能名，防止路径遍历攻击。
+
+    Returns:
+        校验通过返回绝对路径，失败返回 None
+    """
+    if not name or not name.strip():
+        return None
+    # 只允许字母、数字、下划线、连字符
+    if not re.match(r'^[a-zA-Z0-9_-]+$', name):
+        return None
+    path = (SKILLS_DIR / f"{name}.py").resolve()
+    # 确保解析后仍在 SKILLS_DIR 内
+    if not str(path).startswith(str(SKILLS_DIR)):
+        return None
+    return path
+
+
+def _validate_package_name(pkg: str) -> str | None:
+    """
+    校验包名，防止 shell 注入。
+
+    Returns:
+        校验通过返回清理后的包名，失败返回 None
+    """
+    if not pkg or not pkg.strip():
+        return None
+    # 只允许字母、数字、下划线、连字符、点、大于等于小于号（版本约束）
+    cleaned = re.sub(r'[^a-zA-Z0-9_\-.><=!~ ]', '', pkg).strip()
+    if not cleaned:
+        return None
+    # 白名单检查（如果设置了的话）
+    if _ALLOWED_PACKAGES:
+        base_name = re.split(r'[><=!~ ]', cleaned)[0].strip()
+        if base_name not in _ALLOWED_PACKAGES:
+            return None
+    return cleaned
 
 
 MAID_SYSTEM_PROMPT = """
@@ -76,10 +120,10 @@ MAID_SYSTEM_PROMPT = """
 class MaidAgent:
     """
     小女仆 Agent
-    
+
     负责自主编程进化
     """
-    
+
     def __init__(self, llm_caller=None):
         """
         Args:
@@ -88,24 +132,24 @@ class MaidAgent:
         self.llm_caller = llm_caller
         self.task_queue = asyncio.Queue()
         self.current_tasks: dict[str, str] = {}  # session_id -> task_desc
-    
+
     async def delegate(self, task_desc: str, session_id: str = None) -> str:
         """
         委托任务给小女仆
-        
+
         Args:
             task_desc: 任务描述
             session_id: 会话ID
-            
+
         Returns:
             str: 任务结果
         """
         logger.info(f"[Maid] 收到委托: {task_desc}")
-        
+
         # 记录当前任务
         if session_id:
             self.current_tasks[session_id] = task_desc
-        
+
         try:
             result = await self._execute_loop(task_desc)
             return result
@@ -116,7 +160,7 @@ class MaidAgent:
         finally:
             if session_id and session_id in self.current_tasks:
                 del self.current_tasks[session_id]
-    
+
     async def _execute_loop(self, task_desc: str, max_rounds: int = 10) -> str:
         """
         执行循环：LLM 规划 -> 执行工具 -> 反馈
@@ -125,14 +169,14 @@ class MaidAgent:
             {"role": "system", "content": MAID_SYSTEM_PROMPT},
             {"role": "user", "content": f"任务: {task_desc}"}
         ]
-        
+
         for round_num in range(max_rounds):
             # 调用 LLM
             if not self.llm_caller:
                 return "错误: LLM 调用器未配置"
-            
+
             response = await self.llm_caller(messages)
-            
+
             # 解析 JSON
             try:
                 action = self._parse_json(response)
@@ -141,33 +185,53 @@ class MaidAgent:
                 messages.append({"role": "assistant", "content": response})
                 messages.append({"role": "user", "content": "请输出合法的 JSON 格式"})
                 continue
-            
+
             tool = action.get("tool", "")
             args = action.get("args", {})
             thought = action.get("thought", "")
-            
+
             logger.info(f"[Maid] Round {round_num + 1}: {tool}({args})")
             logger.debug(f"[Maid] Thought: {thought}")
-            
+
             # 执行工具
             if tool == "finish":
                 return args.get("reason", "任务完成")
-            
+
             result = await self._execute_tool(tool, args)
-            
+
             # 反馈给 LLM
             messages.append({"role": "assistant", "content": response})
             messages.append({"role": "user", "content": f"工具返回: {result}"})
-        
+
         return "达到最大轮次限制，任务未完成"
-    
+
     def _parse_json(self, text: str) -> dict:
-        """提取 JSON"""
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        return json.loads(text)
-    
+        """
+        从文本中提取 JSON（非贪婪匹配最外层花括号）
+        """
+        # 尝试直接解析
+        text = text.strip()
+        if text.startswith('{'):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                pass
+
+        # 非贪婪匹配：找第一个 { 和它对应的 }
+        depth = 0
+        start = -1
+        for i, ch in enumerate(text):
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    return json.loads(text[start:i + 1])
+
+        raise ValueError("未找到合法 JSON")
+
     async def _execute_tool(self, tool: str, args: dict) -> str:
         """执行工具"""
         try:
@@ -185,31 +249,36 @@ class MaidAgent:
                 return f"未知工具: {tool}"
         except Exception as e:
             return f"工具执行错误: {e}"
-    
+
     def _list_skills(self) -> str:
         """列出技能"""
         skills = [f.stem for f in SKILLS_DIR.glob("*.py")]
         return json.dumps(skills, ensure_ascii=False)
-    
+
     def _read_skill(self, name: str) -> str:
-        """读取技能"""
-        path = SKILLS_DIR / f"{name}.py"
+        """读取技能（带路径遍历防护）"""
+        path = _validate_skill_name(name)
+        if path is None:
+            return f"错误: 无效的技能名 '{name}'"
         if path.exists():
             return path.read_text(encoding='utf-8')
         return f"技能 {name} 不存在"
-    
+
     def _write_skill(self, name: str, code: str) -> str:
-        """写入技能"""
+        """写入技能（带路径遍历防护）"""
         if not name:
             return "错误: name 不能为空"
-        
+
+        path = _validate_skill_name(name)
+        if path is None:
+            return f"错误: 无效的技能名 '{name}'"
+
         # 清洗代码块
         code = self._clean_code_block(code)
-        
-        path = SKILLS_DIR / f"{name}.py"
+
         path.write_text(code, encoding='utf-8')
         return f"技能 {name} 已保存"
-    
+
     def _clean_code_block(self, code: str) -> str:
         """清洗代码块"""
         code = code.strip()
@@ -221,60 +290,81 @@ class MaidAgent:
                 lines = lines[:-1]
             code = "\n".join(lines).strip()
         return code
-    
+
     async def _run_skill(self, name: str) -> str:
-        """运行技能"""
-        path = SKILLS_DIR / f"{name}.py"
+        """运行技能（带超时+进程清理）"""
+        path = _validate_skill_name(name)
+        if path is None:
+            return f"错误: 无效的技能名 '{name}'"
         if not path.exists():
             return f"技能 {name} 不存在"
-        
+
+        process = None
         try:
             process = await asyncio.create_subprocess_exec(
-                os.sys.executable, str(path),
+                sys.executable, str(path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            
+
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
                 timeout=60
             )
-            
+
             output = stdout.decode('utf-8', errors='replace')
             if process.returncode != 0:
                 error = stderr.decode('utf-8', errors='replace')
                 return f"执行错误 (code={process.returncode}):\n{error}"
-            
+
             return output
-            
+
         except asyncio.TimeoutError:
-            return "执行超时"
+            # 超时必须杀掉进程，防止僵尸进程累积
+            if process and process.returncode is None:
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
+            return "执行超时（已终止进程）"
         except Exception as e:
+            if process and process.returncode is None:
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    pass
             return f"执行异常: {e}"
-    
+
     async def _install_package(self, pkg: str) -> str:
-        """安装包"""
+        """安装包（带校验）"""
+        pkg = _validate_package_name(pkg)
+        if not pkg:
+            return "错误: 无效的包名"
+
         try:
+            logger.info(f"[Maid] pip install {pkg}")
             process = await asyncio.create_subprocess_exec(
-                os.sys.executable, "-m", "pip", "install", pkg,
+                sys.executable, "-m", "pip", "install", pkg,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            
+
             stdout, stderr = await process.communicate()
-            
+
             if process.returncode == 0:
                 return f"已安装 {pkg}"
             else:
                 return f"安装失败: {stderr.decode('utf-8', errors='replace')}"
-                
+
         except Exception as e:
             return f"安装异常: {e}"
-    
+
     def get_current_task(self, session_id: str) -> Optional[str]:
         """获取某个会话的当前任务"""
         return self.current_tasks.get(session_id)
-    
+
     def list_all_skills(self) -> list[str]:
         """列出所有技能（供外部调用）"""
         return [f.stem for f in SKILLS_DIR.glob("*.py")]
@@ -285,18 +375,18 @@ class MaidAgent:
 async def maid_worker(mind, sender=None, history=None):
     """
     小女仆后台 worker
-    
+
     持续监听任务队列并执行
     """
     # 这个函数需要在 Phase 2 中与 Mind 集成
     # 目前只是占位
     logger.info("[Maid] 后台 worker 启动")
-    
+
     # TODO: 从 mind 获取任务队列
     # while True:
     #     task = await mind.maid_task_queue.get()
     #     result = await mind.maid.delegate(task["goal"], task.get("session_id"))
     #     # 将结果写入记忆
     #     ...
-    
+
     await asyncio.sleep(float('inf'))  # 保持运行

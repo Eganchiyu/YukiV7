@@ -57,10 +57,10 @@ async def main():
     
     # Core 初始化
     print("[Core] 初始化...")
-    identity = YukiIdentity()
+    identity = YukiIdentity(config_path=str(PROJECT_ROOT / "configs" / "identities.yaml"))
     print(f"  ✅ Identity: {identity.persona.display_name}")
     
-    mind = YukiMind(identity)
+    mind = YukiMind(identity, keep_last_dialogue=cfg.KEEP_LAST_DIALOGUE)
     print(f"  ✅ Mind: 精力/活跃度/欲望/生物钟")
     
     memory = YukiMemory(

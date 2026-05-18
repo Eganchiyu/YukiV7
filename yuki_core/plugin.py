@@ -6,7 +6,7 @@ Yuki 插件基类
 """
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, Optional, TYPE_CHECKING
+from typing import AsyncIterator, Any, Optional, TYPE_CHECKING
 from pathlib import Path
 import importlib
 import yaml
@@ -96,12 +96,12 @@ class PlatformPlugin(ABC):
     # === 格式转换 ===
     
     @abstractmethod
-    def translate_in(self, raw_data: any) -> PlatformEvent:
+    def translate_in(self, raw_data: Any) -> PlatformEvent:
         """将平台原始数据转为统一格式"""
         pass
     
     @abstractmethod
-    def translate_out(self, event: PlatformEvent, response: YukiResponse) -> any:
+    def translate_out(self, event: PlatformEvent, response: YukiResponse) -> Any:
         """将 Yuki 回复转为平台格式"""
         pass
     
@@ -134,8 +134,9 @@ class CapabilityPlugin(ABC):
     version: str = "0.1.0"
     
     # === JSON Schema ===
-    parameters_schema: dict = {}
-    return_schema: dict = {}
+    # 注意：子类应在 __init__ 中设置，避免可变默认值共享问题
+    parameters_schema: dict = None
+    return_schema: dict = None
     
     # === 由 ContextBus 注入 ===
     bus: Optional['ContextBus'] = None
@@ -159,8 +160,8 @@ class CapabilityPlugin(ABC):
             "name": self.name,
             "display_name": self.display_name,
             "description": self.description,
-            "parameters": self.parameters_schema,
-            "returns": self.return_schema,
+            "parameters": self.parameters_schema or {},
+            "returns": self.return_schema or {},
         }
     
     async def validate_params(self, params: dict) -> bool:
@@ -210,8 +211,11 @@ def _load_plugin(bus: 'ContextBus', name: str, config: dict, plugin_type: str):
         if not class_path:
             logger.warning(f"[PluginLoader] 插件 {name} 未指定 class")
             return
-        
+
         # 动态导入
+        if '.' not in class_path:
+            logger.warning(f"[PluginLoader] 插件 {name} class 路径格式错误: {class_path}")
+            return
         module_path, class_name = class_path.rsplit('.', 1)
         module = importlib.import_module(module_path)
         plugin_class = getattr(module, class_name)

@@ -139,8 +139,22 @@ class Config:
     def TARGET_GROUPS(self) -> list:
         groups = self.get("target", "groups", default=[])
         if isinstance(groups, str):
-            return [int(g.strip()) for g in groups.split(",") if g.strip()]
-        return [int(g) for g in groups] if groups else []
+            result = []
+            for g in groups.split(","):
+                g = g.strip()
+                if g:
+                    try:
+                        result.append(int(g))
+                    except ValueError:
+                        logger.warning(f"[Config] 无效的群号: {g}")
+            return result
+        result = []
+        for g in (groups or []):
+            try:
+                result.append(int(g))
+            except (ValueError, TypeError):
+                logger.warning(f"[Config] 无效的群号: {g}")
+        return result
 
     @property
     def DEBOUNCE_TIME(self) -> float:
@@ -188,7 +202,10 @@ class Config:
 
     @property
     def KEYWORDS(self) -> list:
-        base = list(self.get("attention", "keywords", default=["主人", "哥哥"]))
+        val = self.get("attention", "keywords", default=["主人", "哥哥"])
+        if isinstance(val, str):
+            val = [val]
+        base = list(val) if val else ["主人", "哥哥"]
         robot = self.ROBOT_NAME
         if robot and robot not in base:
             base.append(robot)
@@ -287,6 +304,9 @@ class Config:
         """aiohttp 超时配置 (秒)"""
         import aiohttp
         timeout = self.get("connection", "request_timeout", default=30)
+        if isinstance(timeout, dict):
+            # 支持 {"total": 30, "connect": 10, "sock_read": 20} 格式
+            return aiohttp.ClientTimeout(**timeout)
         return aiohttp.ClientTimeout(total=timeout)
 
 

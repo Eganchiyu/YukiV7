@@ -32,9 +32,10 @@ class YukiMind:
     不包含精力/欲望等业务逻辑，由插件层决定是否调用
     """
 
-    def __init__(self, identity: YukiIdentity = None):
+    def __init__(self, identity: YukiIdentity = None, keep_last_dialogue: int = 10):
         self.identity = identity or YukiIdentity()
-        self._writing_diary: set = set()
+        self._writing_diary: set = set()  # 防止并发写日记（预留）
+        self._keep_last_dialogue = keep_last_dialogue
 
     async def process(
         self,
@@ -172,7 +173,7 @@ class YukiMind:
 
         # 3. 近期对话 — 对齐 YukiV6 的切片和时间处理
         if chat_history:
-            keep = 10  # KEEP_LAST_DIALOGUE
+            keep = self._keep_last_dialogue  # 默认 10，可通过 config 配置
             recent_raw = chat_history[-keep - 1:-1] if len(chat_history) > 1 else []
             recent_raw = [m for m in recent_raw if m.get("role") != "system"]
 

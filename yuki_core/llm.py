@@ -12,6 +12,9 @@ import logging
 
 logger = logging.getLogger("llm")
 
+# 错误前缀哨兵：所有 LLM 错误返回都以此开头，robust_chat 靠此判断是否需要切换备用
+_ERROR_SENTINEL = "（"
+
 
 def close_session():
     """兼容接口，requests 无全局 session 需要关闭"""
@@ -55,18 +58,27 @@ def _chat_completion_sync(
         resp = requests.post(url, json=payload, headers=headers, timeout=(10, 60))
         if resp.status_code == 200:
             data = resp.json()
-            content = data["choices"][0]["message"]["content"]
+            # 防御性访问：API 可能返回空 choices 或格式异常
+            choices = data.get("choices", [])
+            if not choices:
+                logger.error("[LLM] API 返回空 choices")
+                return f"{_ERROR_SENTINEL}API 返回空响应）"
+            content = choices[0].get("message", {}).get("content", "")
+            if not content:
+                logger.error("[LLM] API 返回空 content")
+                return f"{_ERROR_SENTINEL}API 返回空内容）"
             return content.strip()
         else:
             err = resp.text[:200]
             logger.error(f"[LLM] API 错误 {resp.status_code}: {err}")
-            return f"（API 调用失败: HTTP {resp.status_code}）"
+            return f"{_ERROR_SENTINEL}API 调用失败: HTTP {resp.status_code}）"
     except requests.exceptions.Timeout:
         logger.error("[LLM] 请求超时")
-        return "（API 调用超时）"
+        return f"{_ERROR_SENTINEL}API 调用超时）"
     except Exception as e:
+        # 记录完整错误，但不泄露给用户
         logger.error(f"[LLM] 请求异常: {e}")
-        return f"（API 调用异常: {e}）"
+        return f"{_ERROR_SENTINEL}API 调用异常）"
 
 
 async def chat_completion(
@@ -120,11 +132,14 @@ async def robust_chat(
         **kwargs,
     )
 
-    if not result.startswith("（"):
+    # 用哨兵前缀判断是否为错误（_chat_completion_sync 所有错误都以 "（" 开头）
+    if not result.startswith(_ERROR_SENTINEL):
         return result
 
+    logger.warning(f"[LLM] 主线路失败: {result}")
+
     if backup_api_key and backup_base_url:
-        logger.warning("[LLM] 主线路失败，切换备用")
+        logger.warning("[LLM] 切换备用线路")
         result = await chat_completion(
             messages=messages,
             model=backup_model or model,
@@ -133,7 +148,7 @@ async def robust_chat(
             disable_thinking=disable_thinking,
             **kwargs,
         )
-        if not result.startswith("（"):
+        if not result.startswith(_ERROR_SENTINEL):
             return result
 
     return "（Yuki 好像有点不舒服，暂时连接不上大脑...主人等会再找我好吗？）"

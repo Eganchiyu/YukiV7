@@ -33,7 +33,7 @@ from .identity import (
 )
 
 # 决策引擎
-from .mind import YukiMind, EnergySystem, ActivityTracker, DesireCalculator, BioClock
+from .mind import YukiMind
 
 # 记忆系统
 from .memory import YukiMemory
@@ -72,8 +72,7 @@ __all__ = [
     "get_summary_prompt", "VISION_PROMPT",
     
     # 决策
-    "YukiMind", "EnergySystem", "ActivityTracker", 
-    "DesireCalculator", "BioClock",
+    "YukiMind",
     
     # 记忆
     "YukiMemory",
@@ -83,6 +82,9 @@ __all__ = [
     
     # 总线
     "ContextBus",
+    
+    # 历史
+    "HistoryManager",
     
     # 插件
     "PlatformPlugin", "CapabilityPlugin", "load_plugins_from_config",

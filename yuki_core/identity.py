@@ -7,7 +7,10 @@ Yuki 身份定义模块
 """
 
 import yaml
+import logging
 from pathlib import Path
+
+logger = logging.getLogger("identity")
 from typing import Optional
 from dataclasses import dataclass, field
 
@@ -196,10 +199,15 @@ class YukiIdentity:
     def get_platform_identity(self, platform: str) -> IdentityContext:
         """
         获取指定平台的身份配置
-        
+
         如果没有该平台的配置，返回默认的群聊配置
         """
-        return self.platform_identities.get(platform, self.platform_identities.get("group"))
+        result = self.platform_identities.get(platform, self.platform_identities.get("group"))
+        if result is None:
+            # 兜底：返回一个最小的 IdentityContext
+            logger.warning(f"[Identity] 平台 '{platform}' 无身份配置，使用空配置")
+            return IdentityContext(platform=platform, context_prompt="")
+        return result
     
     def get_system_prompt(self, platform: str) -> str:
         """
