@@ -287,3 +287,60 @@ VISION_PROMPT = """
 ## 【格式规范】
 - 字数限制：不超过15个字。
 """
+
+
+def build_ice_break_prompt(chat_id, relevant_diaries: list, history_dict: dict):
+    """
+    构建专用的破冰 Prompt（对齐 V6 core/prompts.py build_ice_break_prompt）
+
+    :param chat_id: 群聊群号
+    :param relevant_diaries: RAG 检索回来的字典列表
+    :param history_dict: 原始历史字典
+    """
+    import datetime as _dt
+
+    # 1. 获取当前时间感
+    now = _dt.datetime.now()
+    time_desc = "深夜" if 1 <= now.hour <= 5 else "早上" if 6 <= now.hour <= 9 else "午后" if 13 <= now.hour <= 16 else "晚上"
+
+    # 3. 构造基础人设指令
+    base_setting = get_yuki_setting_group()
+
+    # 4. 组装提示词块
+    active_instruction = (
+        f"\n\n--- 破冰模式指令 ---\n"
+        f"当前环境：群聊安静中，大家已经有一段时间没说话了。\n"
+        f"当前时间：{now.strftime('%Y-%m-%d %H:%M')}({time_desc})\n\n"
+    )
+    instructions = (
+        f"【任务要求】\n"
+        f"1. 请根据上方的「最近历史记录」和下方的「日记内容」，选择一个有趣的切入点自然地开口。\n"
+        f"2. 减少使用客套开场白。\n"
+        f"3. 语气要像个真实的女孩子，可以是一个突然的感慨、一个随意的分享，或者对之前某个话题的'后知后觉'。\n"
+        f"4. 限制在 30-60 字以内\n"
+    )
+
+    # 5. 构建 Final Messages
+    messages = [
+        {"role": "system", "content": base_setting + active_instruction},
+    ]
+
+    recent_history = [msg for msg in history_dict.get(chat_id, [])[-3:] if msg["role"] != "system"]
+
+    if recent_history:
+        messages.extend(recent_history)
+
+    messages = messages + [{"role": "system", "content": instructions}]
+
+    for diary_obj in reversed(relevant_diaries):
+        content = diary_obj['content'].replace('\n', ' ')
+        messages.append({"role": "system", "content": f"【回忆】{content}"})
+
+    # 7. 放置触发指令
+    messages.append({"role": "user", "content": (
+        f"群聊安静中，大家已经有一段时间没说话了。\n"
+        f"当前时间：{now.strftime('%Y-%m-%d %H:%M')}({time_desc})\n\n"
+        f"(你看着安静的群聊，忽然想起了什么，决定开口说一句话...)"
+    )})
+
+    return messages
