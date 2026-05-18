@@ -102,16 +102,96 @@ class QQPlugin(PlatformPlugin):
         self._running = False
         if self._listen_task:
             self._listen_task.cancel()
+        # 取消所有未处理的 debounce 定时器
+        for task in self.buffer_tasks.values():
+            task.cancel()
+        self.buffer_tasks.clear()
         if self.connector:
             await self.connector.close()
         logger.info("[QQ] 已断开连接")
     
+    # ================= V6 消息缓冲 + 防抖 =================
+
+    def _is_bot_message(self, sender_name: str) -> bool:
+        """判断是否为机器人消息（V6 逻辑）"""
+        return "BOT" in sender_name or "机器人" in sender_name
+
+    def pop_buffer(self, chat_id) -> list:
+        """原子化取出并清空缓冲区（对齐 V6 brain.pop_buffer）"""
+        msgs = self.message_buffer.get(chat_id, [])
+        self.message_buffer[chat_id] = []
+        self.buffer_tasks.pop(chat_id, None)
+        return msgs
+
+    async def process_buffered(self, session_id: str, mode: str):
+        """
+        防抖回调：等待 N 秒后合并处理缓冲消息（对齐 V6 main_process）
+        
+        被 @yuki 时 N=5，否则 N=DEBOUNCE_TIME
+        """
+        debounce_time = self.debounce_time
+        
+        # 如果被 @ 了，缩短等待时间
+        buffer = self.message_buffer.get(session_id, [])
+        for msg in buffer:
+            raw = msg.get("raw_text", "")
+            if self.robot_name.lower() in raw.lower():
+                debounce_time = 5
+                break
+        
+        await asyncio.sleep(debounce_time)
+        
+        # 醒来后检查群是否被关闭（V6 终极拦截）
+        if mode == "group" and not self.group_active_state.get(session_id, True):
+            logger.info(f"[QQ] [{session_id}] 协程醒来，但群已被静音，丢弃遗留消息")
+            self.pop_buffer(session_id)
+            return
+        
+        # 弹出所有缓冲消息
+        message_objs = self.pop_buffer(session_id)
+        if not message_objs:
+            return
+        
+        # 合并为一条消息（V6 逻辑：多条消息拼成一条给 LLM）
+        combined_parts = []
+        for msg in message_objs:
+            name = msg.get("name", "???")
+            content = msg.get("content", "")
+            combined_parts.append(f'【"{name}"】说: {content}')
+        
+        combined_text = "\n".join(combined_parts)
+        
+        # 构造合并后的 PlatformEvent，交给 bus 处理
+        from yuki_core.models import PlatformEvent, EventType, SessionType
+        
+        first = message_objs[0]
+        event = PlatformEvent(
+            source="qq",
+            event_type=EventType.MESSAGE,
+            content=combined_text,
+            user_id=first.get("user_id", ""),
+            user_name=first.get("name", ""),
+            session_id=session_id,
+            session_type=SessionType.GROUP if mode == "group" else SessionType.PRIVATE,
+            metadata={
+                "group_id": first.get("group_id"),
+                "sender_name": first.get("name", ""),
+                "message_count": len(message_objs),
+                "is_combined": len(message_objs) > 1,
+            }
+        )
+        
+        # 通过 bus 处理
+        if self.bus:
+            response = await self.bus.receive(event)
+            if response and response.text:
+                await self.send(event, response)
+
     async def receive(self) -> AsyncIterator[PlatformEvent]:
         """
         接收消息（异步迭代器）
         
-        Yields:
-            PlatformEvent: 统一格式事件
+        V6 逻辑：消息先入缓冲区，防抖 N 秒后合并处理
         """
         self._running = True
         
@@ -126,8 +206,47 @@ class QQPlugin(PlatformPlugin):
                         continue
                     
                     event = self.translate_in(data)
-                    if event:
-                        yield event
+                    if not event:
+                        continue
+                    
+                    # === V6 防抖逻辑 ===
+                    session_id = event.session_id
+                    
+                    # 过滤机器人消息（V6 逻辑：机器人消息不进缓冲，除非是特定 QQ）
+                    sender_name = event.user_name
+                    is_bot = self._is_bot_message(sender_name)
+                    if is_bot:
+                        # 机器人消息也更新 last_message_time
+                        if self.bus:
+                            self.bus._last_message_time[session_id] = time.time()
+                        continue
+                    
+                    # 追踪最后消息时间（用于日记空闲判断）
+                    if self.bus:
+                        self.bus._last_message_time[session_id] = time.time()
+                    
+                    # 入队
+                    if session_id not in self.message_buffer:
+                        self.message_buffer[session_id] = []
+                    
+                    raw_text = event.metadata.get("raw_message", event.content)
+                    self.message_buffer[session_id].append({
+                        "name": sender_name,
+                        "content": event.content,
+                        "raw_text": raw_text,
+                        "user_id": event.user_id,
+                        "group_id": event.metadata.get("group_id"),
+                        "is_bot": is_bot,
+                    })
+                    
+                    # 取消旧定时器，启动新定时器
+                    if session_id in self.buffer_tasks:
+                        self.buffer_tasks[session_id].cancel()
+                    
+                    mode = "group" if event.session_type == SessionType.GROUP else "private"
+                    self.buffer_tasks[session_id] = asyncio.create_task(
+                        self.process_buffered(session_id, mode)
+                    )
                         
             except asyncio.CancelledError:
                 break
