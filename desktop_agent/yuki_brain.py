@@ -68,9 +68,11 @@ def print_page_state(snapshot):
             text = f"<{el.get('tag', '?')}>"
         if len(text) > 50:
             text = text[:47] + '...'
-        tag_extra = el.get('type', '')
+        tag_extra = el.get('type') or ''
         if tag_extra:
             tag_extra = f":{tag_extra}"
+        else:
+            tag_extra = ''
         print(f"  {el['id']:>3}  {icon}  {el['tag']}{tag_extra:8s}  {text}{state}")
 
     print(f"{'─' * 60}")
