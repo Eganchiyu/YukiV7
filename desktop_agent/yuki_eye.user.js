@@ -1,10 +1,13 @@
 // ==UserScript==
 // @name         Yuki Desktop Agent - Eye
 // @namespace    yuki-agent
-// @version      0.3
-// @description  扫描页面交互元素，通过 HTTP+SSE 与 Yuki 后端通信
+// @version      0.5
+// @description  扫描页面交互元素，通过 HTTP 轮询与 Yuki 后端通信
 // @match        *://*/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
+// @connect      localhost
+// @inject-into  page
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -13,12 +16,12 @@
 
   const BACKEND = 'http://127.0.0.1:8766';
   const SCAN_INTERVAL = 3000;
+  const POLL_INTERVAL = 1000;  // 每秒轮询一次指令
   const MAX_ELEMENTS = 80;
 
   let lastScanHash = '';
   let scanThrottle = null;
   let statusBadge = null;
-  let sseSource = null;
 
   // ==================== 状态指示器 ====================
 
@@ -45,62 +48,52 @@
     statusBadge.textContent = '● ' + text;
   }
 
-  // ==================== SSE 连接（接收指令） ====================
+  // ==================== HTTP 通信 ====================
 
-  function connectSSE() {
-    if (sseSource) {
-      sseSource.close();
-    }
-
-    console.log('[Yuki-Eye] Connecting SSE to', BACKEND + '/events');
-    sseSource = new EventSource(BACKEND + '/events');
-
-    sseSource.onopen = () => {
-      console.log('[Yuki-Eye] ✅ SSE connected');
-      setStatus('green', 'YUKI:ONLINE');
-    };
-
-    sseSource.onmessage = (event) => {
-      console.log('[Yuki-Eye] SSE ←', event.data.slice(0, 200));
-      try {
-        const msg = JSON.parse(event.data);
-        handleCommand(msg);
-      } catch (e) {
-        console.warn('[Yuki-Eye] Bad SSE message:', e);
-      }
-    };
-
-    sseSource.onerror = () => {
-      console.warn('[Yuki-Eye] SSE disconnected, will retry...');
-      setStatus('red', 'YUKI:OFFLINE');
-      // EventSource 自动重连
-    };
-  }
-
-  // ==================== HTTP POST（发送数据） ====================
-
-  function postJSON(path, data) {
+  function gmPost(path, data) {
     const url = BACKEND + path;
     const body = JSON.stringify(data);
-    console.log('[Yuki-Eye] POST', path, body.slice(0, 150));
 
-    // 用 sendBeacon + fetch 双保险
-    try {
-      // sendBeacon 在页面卸载时也能发送
-      const blob = new Blob([body], { type: 'application/json' });
-      navigator.sendBeacon(url, blob);
-    } catch {
-      // sendBeacon 不支持时 fallback
-    }
-
-    fetch(url, {
+    GM_xmlhttpRequest({
       method: 'POST',
+      url: url,
       headers: { 'Content-Type': 'application/json' },
-      body: body,
-    }).then(res => {
-      console.log('[Yuki-Eye] POST response:', res.status);
-    }).catch(err => {
-      console.warn('[Yuki-Eye] POST failed:', err.message);
+      data: body,
+      onload: (res) => {
+        console.log('[Yuki-Eye] POST', path, '→', res.status);
+      },
+      onerror: (err) => {
+        console.warn('[Yuki-Eye] POST failed:', err.statusText || 'error');
+        setStatus('red', 'YUKI:OFFLINE');
+      },
+    });
+  }
+
+  function gmGet(path, callback) {
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: BACKEND + path,
+      onload: (res) => {
+        try {
+          const data = JSON.parse(res.responseText);
+          callback(data);
+        } catch {}
+      },
+      onerror: () => {
+        setStatus('red', 'YUKI:OFFLINE');
+      },
+    });
+  }
+
+  // ==================== 轮询指令 ====================
+
+  function pollCommands() {
+    gmGet('/poll', (data) => {
+      if (data.type && data.type !== 'noop') {
+        console.log('[Yuki-Eye] Poll ←', JSON.stringify(data).slice(0, 200));
+        handleCommand(data);
+      }
+      setStatus('green', 'YUKI:ONLINE');
     });
   }
 
@@ -122,7 +115,6 @@
 
     for (const el of candidates) {
       if (!isVisible(el)) continue;
-
       const rect = el.getBoundingClientRect();
       if (rect.width < 4 || rect.height < 4) continue;
 
@@ -141,16 +133,12 @@
         placeholder: el.placeholder || null,
         href: el.tagName === 'A' ? (el.href || '').slice(0, 120) : null,
         selector: selector,
-        rect: {
-          x: Math.round(rect.x), y: Math.round(rect.y),
-          w: Math.round(rect.width), h: Math.round(rect.height),
-        },
+        rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
         state: getElementState(el),
       });
 
       if (elements.length >= MAX_ELEMENTS) break;
     }
-
     return elements;
   }
 
@@ -166,30 +154,25 @@
   }
 
   function generateSelector(el) {
-    // id
     if (el.id && /^[a-zA-Z][\w-]*$/.test(el.id)) {
       if (document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) {
         return '#' + CSS.escape(el.id);
       }
     }
-    // data-testid
     for (const attr of ['data-testid', 'data-cy', 'data-qa']) {
       const val = el.getAttribute(attr);
       if (val) return `[${attr}="${val}"]`;
     }
-    // name in form
     if (el.name) {
       const scope = el.closest('form') || document;
       if (scope.querySelectorAll('[name="' + el.name + '"]').length === 1) {
         return el.tagName.toLowerCase() + '[name="' + el.name + '"]';
       }
     }
-    // aria-label
     if (el.getAttribute('aria-label')) {
       const sel = el.tagName.toLowerCase() + '[aria-label="' + el.getAttribute('aria-label') + '"]';
       if (document.querySelectorAll(sel).length === 1) return sel;
     }
-    // nth-child path
     const path = [];
     let cur = el;
     while (cur && cur !== document.body && cur !== document.documentElement) {
@@ -231,7 +214,6 @@
   function buildSnapshot(trigger) {
     const elements = scanElements();
     const hash = JSON.stringify(elements.map(e => e.selector));
-
     if (trigger !== 'forced' && hash === lastScanHash) return null;
     lastScanHash = hash;
 
@@ -267,7 +249,7 @@
   async function executeAction(action) {
     const el = resolveTarget(action.target);
     if (!el) {
-      postJSON('/action_result', { ok: false, action: action.action, error: 'Element not found' });
+      gmPost('/action_result', { ok: false, action: action.action, error: 'Element not found' });
       return false;
     }
 
@@ -279,10 +261,8 @@
           el.focus();
           el.click();
           const rect = el.getBoundingClientRect();
-          const cx = rect.x + rect.width / 2;
-          const cy = rect.y + rect.height / 2;
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: cx, clientY: cy }));
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2 }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2 }));
           break;
         }
         case 'type':
@@ -323,15 +303,15 @@
           await sleep(action.ms || 1000);
           break;
         default:
-          postJSON('/action_result', { ok: false, action: action.action, error: 'Unknown action' });
+          gmPost('/action_result', { ok: false, action: action.action, error: 'Unknown' });
           return false;
       }
 
       setStatus('blue', 'YUKI:' + action.action.toUpperCase());
-      postJSON('/action_result', { ok: true, action: action.action });
+      gmPost('/action_result', { ok: true, action: action.action });
       return true;
     } catch (e) {
-      postJSON('/action_result', { ok: false, action: action.action, error: e.message });
+      gmPost('/action_result', { ok: false, action: action.action, error: e.message });
       return false;
     }
   }
@@ -358,7 +338,7 @@
   function triggerScan(trigger) {
     const snapshot = buildSnapshot(trigger);
     if (snapshot) {
-      postJSON('/scan', snapshot);
+      gmPost('/scan', snapshot);
       setStatus('blue', 'YUKI:SCAN:' + snapshot.element_count + 'els');
     }
   }
@@ -376,8 +356,8 @@
   createStatusBadge();
   setStatus('gray', 'YUKI:CONNECTING');
 
-  // SSE 连接（接收指令）
-  connectSSE();
+  // 轮询指令
+  setInterval(pollCommands, POLL_INTERVAL);
 
   // 定时扫描
   setInterval(() => triggerScan('timer'), SCAN_INTERVAL);

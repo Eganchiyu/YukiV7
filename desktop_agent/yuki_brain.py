@@ -1,20 +1,19 @@
 """
-Yuki Desktop Agent - Brain v0.3
-用 HTTP POST + SSE 代替 WebSocket，更稳定。
-浏览器插件 POST 页面数据，通过 SSE 下发指令。
+Yuki Desktop Agent - Brain v0.5
+HTTP POST + 轮询模式。最简单最稳。
 
 用法：
     conda activate ai_env
     python yuki_brain.py
 """
 
-import asyncio
 import json
 import sys
+import time
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
-from queue import Queue
+from collections import deque
 
 # ==================== 配置 ====================
 
@@ -23,8 +22,8 @@ PORT = 8766
 
 BANNER = r"""
   ╔══════════════════════════════════════════════╗
-  ║     🍙 Yuki Desktop Agent - Brain v0.3     ║
-  ║     HTTP: http://127.0.0.1:8766            ║
+  ║     🍙 Yuki Desktop Agent - Brain v0.5     ║
+  ║     http://127.0.0.1:8766                  ║
   ╚══════════════════════════════════════════════╝
 """
 
@@ -33,8 +32,7 @@ BANNER = r"""
 current_elements = []
 current_url = ''
 current_title = ''
-sse_clients = []           # SSE 连接列表（每条是一个 queue）
-pending_commands = Queue() # 待发送的指令队列
+command_queue = deque()  # 待下发的指令
 
 
 # ==================== 页面展示 ====================
@@ -65,17 +63,14 @@ def print_page_state(snapshot):
         state = ''
         if el.get('state'):
             state = f" [{', '.join(el['state'])}]"
-
         text = el.get('text', '') or el.get('placeholder', '') or el.get('href', '') or ''
         if not text:
             text = f"<{el.get('tag', '?')}>"
         if len(text) > 50:
             text = text[:47] + '...'
-
         tag_extra = el.get('type', '')
         if tag_extra:
             tag_extra = f":{tag_extra}"
-
         print(f"  {el['id']:>3}  {icon}  {el['tag']}{tag_extra:8s}  {text}{state}")
 
     print(f"{'─' * 60}")
@@ -84,8 +79,7 @@ def print_page_state(snapshot):
 
 
 def get_icon(el):
-    tag = el.get('tag', '')
-    t = el.get('type', '')
+    tag, t = el.get('tag', ''), el.get('type', '')
     if tag == 'button': return '🔘'
     if tag == 'a':       return '🔗'
     if tag == 'input':
@@ -100,87 +94,14 @@ def get_icon(el):
 # ==================== HTTP 服务 ====================
 
 class BrainHandler(BaseHTTPRequestHandler):
-    """处理来自浏览器插件的 HTTP 请求"""
 
     def log_message(self, format, *args):
-        pass  # 静默 HTTP 日志
+        pass  # 静默
 
     def do_OPTIONS(self):
-        """CORS 预检"""
         self.send_response(200)
         self._cors()
         self.end_headers()
-
-    def do_POST(self):
-        """接收浏览器上报的页面数据"""
-        if self.path == '/scan':
-            length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(length)
-            try:
-                data = json.loads(body)
-                print_page_state(data)
-                self._json_response(200, {'ok': True})
-            except Exception as e:
-                self._json_response(400, {'error': str(e)})
-
-        elif self.path == '/action_result':
-            length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(length)
-            try:
-                data = json.loads(body)
-                status = '✅' if data.get('ok') else '❌'
-                error = f" - {data.get('error')}" if data.get('error') else ''
-                print(f"  {status} {data.get('action', '?')}{error}")
-                self._json_response(200, {'ok': True})
-            except Exception as e:
-                self._json_response(400, {'error': str(e)})
-
-        else:
-            self._json_response(404, {'error': 'not found'})
-
-    def do_GET(self):
-        """SSE 端点：浏览器插件保持连接，实时接收指令"""
-        if self.path == '/events':
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/event-stream')
-            self.send_header('Cache-Control', 'no-cache')
-            self.send_header('Connection', 'keep-alive')
-            self._cors()
-            self.end_headers()
-
-            # 创建这个客户端的队列
-            q = Queue()
-            sse_clients.append(q)
-            print(f"  📡 SSE client connected ({len(sse_clients)} total)")
-
-            try:
-                while True:
-                    # 从队列取指令，超时发心跳
-                    try:
-                        cmd = q.get(timeout=15)
-                        cmd_json = json.dumps(cmd)
-                        self.wfile.write(f"data: {cmd_json}\n\n".encode())
-                        self.wfile.flush()
-                    except:
-                        # 心跳保活
-                        self.wfile.write(b": heartbeat\n\n")
-                        self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            finally:
-                if q in sse_clients:
-                    sse_clients.remove(q)
-                print(f"  📴 SSE client disconnected ({len(sse_clients)} total)")
-
-        elif self.path == '/status':
-            self._json_response(200, {
-                'elements': len(current_elements),
-                'url': current_url,
-                'title': current_title,
-                'sse_clients': len(sse_clients),
-            })
-        else:
-            self._json_response(404, {'error': 'not found'})
 
     def _cors(self):
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -188,23 +109,54 @@ class BrainHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
 
     def _json_response(self, code, data):
+        body = json.dumps(data).encode()
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
         self._cors()
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self.wfile.write(body)
 
-
-def broadcast_command(cmd):
-    """向所有 SSE 客户端广播指令"""
-    dead = []
-    for q in sse_clients:
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length)
         try:
-            q.put_nowait(cmd)
+            data = json.loads(body)
         except:
-            dead.append(q)
-    for q in dead:
-        sse_clients.remove(q)
+            self._json_response(400, {'error': 'bad json'})
+            return
+
+        if self.path == '/scan':
+            print_page_state(data)
+            self._json_response(200, {'ok': True})
+
+        elif self.path == '/action_result':
+            status = '✅' if data.get('ok') else '❌'
+            error = f" - {data.get('error')}" if data.get('error') else ''
+            print(f"  {status} {data.get('action', '?')}{error}")
+            self._json_response(200, {'ok': True})
+
+        else:
+            self._json_response(404, {'error': 'not found'})
+
+    def do_GET(self):
+        """插件轮询此端点获取指令"""
+        if self.path == '/poll':
+            if command_queue:
+                cmd = command_queue.popleft()
+                self._json_response(200, cmd)
+            else:
+                self._json_response(200, {'type': 'noop'})
+
+        elif self.path == '/status':
+            self._json_response(200, {
+                'elements': len(current_elements),
+                'url': current_url,
+                'title': current_title,
+                'pending_commands': len(command_queue),
+            })
+        else:
+            self._json_response(404, {'error': 'not found'})
 
 
 # ==================== 用户输入 ====================
@@ -236,14 +188,13 @@ def user_input_loop():
             return
 
         elif cmd == 'scan':
-            broadcast_command({'type': 'scan'})
+            command_queue.append({'type': 'scan'})
             print('  📡 Scan requested')
 
         elif cmd == 'list':
             if current_elements:
-                fake = {'url': current_url, 'title': current_title,
-                        'elements': current_elements, 'trigger': 'list'}
-                print_page_state(fake)
+                print_page_state({'url': current_url, 'title': current_title,
+                                  'elements': current_elements, 'trigger': 'list'})
             else:
                 print('  (no elements)')
 
@@ -253,7 +204,7 @@ def user_input_loop():
                 el = find_element(eid)
                 if el:
                     print(f'  🖱️  Clicking: {el.get("text", el.get("tag"))}')
-                    broadcast_command({
+                    command_queue.append({
                         'type': 'action',
                         'action': {'action': 'click', 'target': el['selector']}
                     })
@@ -269,7 +220,7 @@ def user_input_loop():
                 el = find_element(eid)
                 if el:
                     print(f'  ⌨️  Typing "{text}"')
-                    broadcast_command({
+                    command_queue.append({
                         'type': 'action',
                         'action': {'action': 'type', 'target': el['selector'], 'text': text}
                     })
@@ -283,7 +234,7 @@ def user_input_loop():
             amount = int(parts[2]) if len(parts) >= 3 else 500
             if direction == 'up':
                 amount = -amount
-            broadcast_command({
+            command_queue.append({
                 'type': 'action',
                 'action': {'action': 'scroll', 'target': 'window', 'amount': amount}
             })
@@ -293,7 +244,7 @@ def user_input_loop():
             url = parts[1]
             if not url.startswith('http'):
                 url = 'https://' + url
-            broadcast_command({
+            command_queue.append({
                 'type': 'action',
                 'action': {'action': 'navigate', 'url': url}
             })
@@ -308,19 +259,15 @@ def user_input_loop():
 def main():
     print(BANNER)
 
-    # 启动 HTTP 服务（后台线程）
     server = HTTPServer((HOST, PORT), BrainHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    print(f"  🌐 HTTP + SSE server on http://{HOST}:{PORT}")
-    print(f"  📌 Endpoints:")
+    print(f"  🌐 Server on http://{HOST}:{PORT}")
     print(f"     POST /scan          ← 插件上报页面数据")
     print(f"     POST /action_result ← 插件上报动作结果")
-    print(f"     GET  /events        ← 插件接收指令 (SSE)")
-    print(f"     GET  /status        ← 查看状态")
+    print(f"     GET  /poll          ← 插件轮询获取指令")
     print()
 
-    # 用户输入循环
     try:
         user_input_loop()
     except KeyboardInterrupt:
