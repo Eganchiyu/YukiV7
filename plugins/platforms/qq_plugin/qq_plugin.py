@@ -116,6 +116,11 @@ class QQPlugin(PlatformPlugin):
         """判断是否为机器人消息（V6 逻辑）"""
         return "BOT" in sender_name or "机器人" in sender_name
 
+    def _is_bot_whitelisted(self, user_id: str) -> bool:
+        """判断是否为白名单机器人（V6 逻辑：特定 QQ 即使带 BOT 前缀也放行）"""
+        whitelist = self.config.BOT_WHITELIST if self.config else []
+        return int(user_id) in whitelist if user_id and user_id.isdigit() else False
+
     def pop_buffer(self, chat_id) -> list:
         """原子化取出并清空缓冲区（对齐 V6 brain.pop_buffer）"""
         msgs = self.message_buffer.get(chat_id, [])
@@ -178,6 +183,7 @@ class QQPlugin(PlatformPlugin):
                 "sender_name": first.get("name", ""),
                 "message_count": len(message_objs),
                 "is_combined": len(message_objs) > 1,
+                "is_bot": all(m.get("is_bot", False) for m in message_objs),
             }
         )
         
@@ -212,11 +218,14 @@ class QQPlugin(PlatformPlugin):
                     # === V6 防抖逻辑 ===
                     session_id = event.session_id
                     
-                    # 过滤机器人消息（V6 逻辑：机器人消息不进缓冲，除非是特定 QQ）
+                    # 过滤机器人消息（V6 逻辑：BOT 消息默认不进缓冲，白名单除外）
                     sender_name = event.user_name
+                    user_id = event.user_id
                     is_bot = self._is_bot_message(sender_name)
-                    if is_bot:
-                        # 机器人消息也更新 last_message_time
+                    is_whitelisted = self._is_bot_whitelisted(user_id)
+                    
+                    if is_bot and not is_whitelisted:
+                        # 非白名单机器人消息：不进缓冲，但仍更新 last_message_time
                         if self.bus:
                             self.bus._last_message_time[session_id] = time.time()
                         continue
@@ -225,7 +234,7 @@ class QQPlugin(PlatformPlugin):
                     if self.bus:
                         self.bus._last_message_time[session_id] = time.time()
                     
-                    # 入队
+                    # 入队（V6 逻辑：白名单 bot 也进缓冲，标记 is_bot）
                     if session_id not in self.message_buffer:
                         self.message_buffer[session_id] = []
                     
@@ -234,7 +243,7 @@ class QQPlugin(PlatformPlugin):
                         "name": sender_name,
                         "content": event.content,
                         "raw_text": raw_text,
-                        "user_id": event.user_id,
+                        "user_id": user_id,
                         "group_id": event.metadata.get("group_id"),
                         "is_bot": is_bot,
                     })

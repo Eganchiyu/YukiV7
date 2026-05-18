@@ -149,6 +149,11 @@ class ContextBus:
         # 追踪消息到达时间（用于日记空闲判断）
         self._last_message_time[event.session_id] = time.time()
         
+        # === V6 decide_to_reply 逻辑（防 bot 无限套娃）===
+        if not self._decide_to_reply(event):
+            logger.info(f"[Bus] {event.session_id} 仅 BOT 在召唤，欲望打折，跳过回复")
+            return None
+        
         # 注入身份上下文
         platform_identity = self.identity.get_platform_identity(event.source)
         event.identity_context = {
@@ -178,6 +183,31 @@ class ContextBus:
         
         return response
     
+    # ================= V6 decide_to_reply =================
+
+    def _decide_to_reply(self, event: PlatformEvent) -> bool:
+        """
+        V6 逻辑：判断是否应该回复
+        
+        - 有人类 @Yuki → 强制回复
+        - 仅 BOT @Yuki → 欲望打折，跳过回复（防无限套娃）
+        - 无 @Yuki → 正常回复（由 mind 的活跃度系统决定）
+        """
+        content = event.metadata.get("raw_message", event.content).lower()
+        keywords = (self.config.KEYWORDS if self.config else []) + ["yuki"]
+        
+        is_calling = any(kw.lower() in content for kw in keywords)
+        if not is_calling:
+            return True  # 没被召唤，交给 mind 正常判断
+        
+        # 被召唤了，检查是否只有 BOT 在召唤
+        is_bot = event.metadata.get("is_bot", False)
+        if is_bot:
+            logger.info(f"[Bus] 检测到 BOT 召唤 Yuki，欲望打折跳过")
+            return False
+        
+        return True
+
     def _make_llm_caller(self):
         """构建 LLM 调用函数"""
         if not self.config:

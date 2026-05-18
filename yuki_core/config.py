@@ -263,6 +263,10 @@ class Config:
         return p
 
     @property
+    def BOT_WHITELIST(self) -> list:
+        return self.get("bot_whitelist", default=[])
+
+    @property
     def MAX_RETRIES(self) -> int:
         return self.get("connection", "max_retries", default=3)
 
