@@ -246,6 +246,45 @@ class Config:
     def DEBUG(self) -> bool:
         return self.get("debug", default=True)
 
+    # ================= V6 兼容：QQ 插件需要的属性 =================
+
+    @property
+    def CACHE_DIR(self) -> str:
+        p = self.get("paths", "cache_dir", default="./data")
+        if p and p.startswith("./"):
+            return str(PROJECT_ROOT / p[2:])
+        return p
+
+    @property
+    def CACHE_FILE(self) -> str:
+        p = self.get("paths", "cache_file", default="./data/meme_cache.json")
+        if p and p.startswith("./"):
+            return str(PROJECT_ROOT / p[2:])
+        return p
+
+    @property
+    def MAX_RETRIES(self) -> int:
+        return self.get("connection", "max_retries", default=3)
+
+    @property
+    def MAX_CONCURRENT_MEME(self) -> int:
+        return self.get("max_concurrent_meme", default=3)
+
+    @property
+    def IMAGE_PROCESS_API_URL(self) -> str:
+        return self.get("api", "image_process_url", default="")
+
+    @property
+    def IMAGE_PROCESS_API_KEY(self) -> str:
+        return self.get("api", "image_process_api_key", default="")
+
+    @property
+    def REQUEST_TIMEOUT(self):
+        """aiohttp 超时配置 (秒)"""
+        import aiohttp
+        timeout = self.get("connection", "request_timeout", default=30)
+        return aiohttp.ClientTimeout(total=timeout)
+
 
 # 全局实例
 cfg = Config()
