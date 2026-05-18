@@ -1,10 +1,9 @@
 import json
 import os
 
-from config import cfg
-from utils.logger import get_logger
-
-logger = get_logger("vision_cache")
+from yuki_core.config import cfg
+import logging
+logger = logging.getLogger("vision_cache")
 
 
 class MemeCache:

@@ -1,9 +1,8 @@
 from typing import Optional, Dict
 
-from network.ws_connection import BotConnector
-from utils.logger import get_logger
-
-logger = get_logger("message_meta")
+from .network import BotConnector
+import logging
+logger = logging.getLogger("message_meta")
 
 
 class MetaGetter:
