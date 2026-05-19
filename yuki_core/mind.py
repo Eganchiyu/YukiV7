@@ -4,8 +4,9 @@ Yuki 决策引擎（精简版）
 
 核心职责：
 1. 构建上下文（system prompt + RAG记忆 + 近期对话 + 当前消息）
-2. 调用 LLM 生成回复
-3. 解析特殊标签（布局、DELEGATE_TO_MAID、MEME_SEARCH）
+2. decide_to_reply 预过滤
+3. 调用 LLM 生成回复
+4. 解析特殊标签（布局、DELEGATE_TO_MAID、MEME_SEARCH）
 
 精力/欲望/活跃度/生物钟/破冰/日记 等业务逻辑全部移至 QQ 插件层
 """
@@ -58,24 +59,15 @@ class YukiMind:
         """
         session_id = event.session_id
 
-        # 1. 如果没有 LLM 调用器，返回占位
-        if not llm_caller:
-            response_text = f"[Mind] 收到来自 {event.user_name or event.user_id} 的消息: {event.content[:50]}..."
-            return YukiResponse(
-                text=response_text,
-                actions=[Action(type=ActionType.REPLY, content=response_text)],
-                metadata={"decision": "no_llm_caller"}
-            )
-
-        # 2. 构建上下文（含 RAG + 历史）
+        # 1. 构建上下文（含 RAG + 历史）— decide_to_reply 需要上下文做 LLM 判断
         context = await self._build_context(event, history_manager, memory)
 
-        # 3. decide_to_reply（如果提供了判定函数）
+        # 2. decide_to_reply（先检查是否应该回复，节省 LLM 调用）
         if decide_to_reply_fn:
             try:
                 should_reply = await decide_to_reply_fn(event, context)
                 if not should_reply:
-                    # 保存历史（即使不回复，用户消息也应记录）
+                    # 保存用户消息（即使不回复也应记录）
                     if history_manager:
                         current_time = event.time_str
                         history_manager.append_message(
@@ -86,6 +78,15 @@ class YukiMind:
             except Exception as e:
                 logger.error(f"[Mind] decide_to_reply 异常: {e}")
                 return None
+
+        # 3. 如果没有 LLM 调用器，返回占位
+        if not llm_caller:
+            response_text = f"[Mind] 收到来自 {event.user_name or event.user_id} 的消息: {event.content[:50]}..."
+            return YukiResponse(
+                text=response_text,
+                actions=[Action(type=ActionType.REPLY, content=response_text)],
+                metadata={"decision": "no_llm_caller"}
+            )
 
         # 4. 调用 LLM
         logger.info(f"[Mind] {session_id} 正在打字...")

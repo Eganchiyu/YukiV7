@@ -5,6 +5,10 @@ QQ Bot 适配器插件
 将 YukiV6 的 QQ 业务逻辑封装为 V7 PlatformPlugin。
 保留所有 V6 业务（防抖、精力、欲望、表情包、视觉理解、破冰、日记），
 适配 V7 架构：LLM → yuki_core.llm, 记忆 → yuki_core.memory, 总线 → ContextBus。
+
+事件流:
+  connector.listen() → _listen_websocket() → debounce → _main_process()
+  → _event_queue.put(event) → receive() yield → Bus → Mind
 """
 
 import asyncio
@@ -44,7 +48,7 @@ class QQPlugin(PlatformPlugin):
 
     name = "QQ Bot"
     platform_id = "qq"
-    version = "0.2.0"
+    version = "0.2.1"
 
     def __init__(self, **config):
         super().__init__(**config)
@@ -78,8 +82,10 @@ class QQPlugin(PlatformPlugin):
         self._group_state_file = "data/group_state.json"
         self._real_time_debounce = self.debounce_time
 
-        # 事件队列（receive → bus）
+        # 事件队列（_main_process → receive）
         self._event_queue: Optional[asyncio.Queue] = None
+        # WebSocket 监听任务
+        self._ws_task: Optional[asyncio.Task] = None
 
     # ================= 生命周期 =================
 
@@ -135,6 +141,8 @@ class QQPlugin(PlatformPlugin):
         return True
 
     async def disconnect(self) -> None:
+        if self._ws_task and not self._ws_task.done():
+            self._ws_task.cancel()
         if self.connector:
             await self.connector.close()
 
@@ -156,15 +164,57 @@ class QQPlugin(PlatformPlugin):
 
     async def receive(self) -> AsyncIterator[PlatformEvent]:
         """
-        监听 NapCat WebSocket，缓冲防抖，预处理后 yield PlatformEvent。
+        从 _event_queue yield PlatformEvent。
 
-        保留 V6 的防抖、buffer、图片理解、CQ 码解析、开关拦截逻辑。
-        不做 decide_to_reply 和 history 加载 — 这些交给 Mind 处理。
+        WebSocket 监听在 _listen_websocket() 后台任务中运行，
+        消息经过防抖 + 预处理后由 _main_process() 放入队列。
         """
-        # 启动后台任务
+        # 启动后台任务（含 WebSocket 监听）
         self._start_background_tasks()
 
-        logger.info("[QQ] 开始监听 NapCat WebSocket...")
+        logger.info("[QQ] 开始从事件队列 yield...")
+        while True:
+            try:
+                event = await self._event_queue.get()
+                yield event
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[QQ] 事件队列读取异常: {e}")
+                await asyncio.sleep(0.1)
+
+    async def send(self, event: PlatformEvent, response: YukiResponse) -> bool:
+        """发送 Yuki 回复到 QQ"""
+        chat_id = event.session_id
+        mode = event.session_type or "group"
+        text = response.text
+
+        if not text:
+            return False
+
+        # 拆分文字和表情包（V6 逻辑）
+        parts = re.split(r'(\[CQ:image,[^\]]*?sub_type=1\])', text, flags=re.IGNORECASE)
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            await self.sender.send(chat_id, part, mode=mode)
+            await asyncio.sleep(1.0)
+
+        # 记录日志
+        self.history_manager.append_to_log(chat_id, cfg.ROBOT_NAME.title(), text)
+
+        return True
+
+    # ================= WebSocket 监听 =================
+
+    async def _listen_websocket(self):
+        """
+        后台任务：监听 NapCat WebSocket，分发消息到防抖队列。
+
+        这是 WebSocket 消息的唯一入口。收到的每条消息都经过：
+        过滤 → 构造 → 入队防抖 → _main_process → _event_queue
+        """
         while True:
             try:
                 async for data in self.connector.listen():
@@ -177,9 +227,7 @@ class QQPlugin(PlatformPlugin):
 
                     # === 私聊 ===
                     if msg_type == "private" and user_id == self.target_qq:
-                        event = await self._process_private_message(user_id, raw_msg)
-                        if event:
-                            yield event
+                        await self._process_private_message(user_id, raw_msg)
 
                     # === 群聊 ===
                     elif msg_type == "group":
@@ -219,38 +267,15 @@ class QQPlugin(PlatformPlugin):
                             self.yuki.ice_break_fail_count[gid_str] = 0
 
                         # 防抖入队
-                        event = await self._enqueue_and_debounce(
+                        await self._enqueue_and_debounce(
                             group_id, content, raw_msg, name, user_id, is_bot, "group"
                         )
-                        if event:
-                            yield event
 
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error(f"[QQ] 监听异常: {e}")
+                logger.error(f"[QQ] WebSocket 监听异常: {e}")
                 await asyncio.sleep(5)
-
-    async def send(self, event: PlatformEvent, response: YukiResponse) -> bool:
-        """发送 Yuki 回复到 QQ"""
-        chat_id = event.session_id
-        mode = event.session_type or "group"
-        text = response.text
-
-        if not text:
-            return False
-
-        # 拆分文字和表情包（V6 逻辑）
-        parts = re.split(r'(\[CQ:image,[^\]]*?sub_type=1\])', text, flags=re.IGNORECASE)
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            await self.sender.send(chat_id, part, mode=mode)
-            await asyncio.sleep(1.0)
-
-        # 记录日志
-        self.history_manager.append_to_log(chat_id, cfg.ROBOT_NAME.title(), text)
-
-        return True
 
     # ================= 防抖与缓冲 =================
 
@@ -259,7 +284,6 @@ class QQPlugin(PlatformPlugin):
     ):
         """
         V6 manage_buffer 逻辑：防抖入队，合并消息后触发处理。
-        返回处理后的 PlatformEvent，或 None（未到时间/被拦截）。
         """
         cid_str = str(chat_id)
         self.yuki.last_message_time[cid_str] = time.time()
@@ -270,7 +294,7 @@ class QQPlugin(PlatformPlugin):
         if raw_msg in ['help', '/help', 'yuki帮助', 'yuki功能', '帮助', '功能']:
             await self.sender.send_local_image(chat_id, "utils/yuki_help.png", mode=mode)
             self.history_manager.append_to_log(chat_id, "User/Group", content)
-            return None
+            return
 
         # 入队
         if chat_id not in self.yuki.message_buffer:
@@ -293,13 +317,12 @@ class QQPlugin(PlatformPlugin):
         self.yuki.buffer_tasks[chat_id] = asyncio.create_task(
             self._main_process(chat_id, mode)
         )
-        return None  # 防抖期间不 yield，等 debounce 完成后由 _main_process 放入队列
 
     async def _main_process(self, chat_id, mode):
         """
-        V6 main_process 逻辑：防抖等待 → 预处理 → 计算预过滤值 → yield PlatformEvent。
+        防抖等待 → 预处理 → 计算预过滤值 → 放入 _event_queue。
 
-        不再做 decide_to_reply 和 history 加载 — 这些交给 Mind。
+        不做 decide_to_reply 和 LLM 调用 — 这些交给 Mind。
         """
         await asyncio.sleep(self._real_time_debounce)
         self._real_time_debounce = self.debounce_time
@@ -337,7 +360,7 @@ class QQPlugin(PlatformPlugin):
 
         logger.info(f"[{chat_id}] 收到消息: {combined_text[:80]}")
 
-        # 记录到日志（不修改 history，history 由 Mind 管理）
+        # 记录到日志
         self.history_manager.append_to_log(chat_id, "User/Group", combined_text)
 
         # === 计算预过滤值（供 Mind 的 decide_to_reply 使用） ===
@@ -360,7 +383,7 @@ class QQPlugin(PlatformPlugin):
                 if any(kw in m["raw_text"].lower() for kw in self.keywords)
             )
 
-        # 构造 PlatformEvent（不含 history，Mind 会自行加载）
+        # 构造 PlatformEvent
         event = PlatformEvent(
             source="qq",
             event_type="message",
@@ -453,7 +476,6 @@ class QQPlugin(PlatformPlugin):
         self.yuki.buffer_tasks[user_id] = asyncio.create_task(
             self._main_process(user_id, "private")
         )
-        return None
 
     # ================= 群开关状态 =================
 
@@ -479,6 +501,7 @@ class QQPlugin(PlatformPlugin):
     def get_background_tasks(self):
         """返回后台常驻任务列表，由 Bus 启动"""
         return [
+            self._listen_websocket(),
             self._bg_decay_heartbeat(),
             self._bg_idle_diary_checker(),
             self._bg_ice_break_monitor(),
@@ -486,8 +509,7 @@ class QQPlugin(PlatformPlugin):
         ]
 
     def _start_background_tasks(self):
-        """在 receive() 启动时注册后台任务"""
-        # 由 Bus 的 get_background_tasks() 自动启动
+        """由 Bus 的 get_background_tasks() 自动启动"""
         pass
 
     async def _bg_decay_heartbeat(self):
