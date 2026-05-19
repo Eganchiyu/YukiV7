@@ -1,1 +1,0 @@
-# qq_plugin.modules
