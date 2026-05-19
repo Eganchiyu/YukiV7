@@ -1,7 +1,6 @@
 # Yuki V6 → V7 差距分析
 
 > 最后更新：2026-05-19 (二次核查后)
-> 详细技术文档：[V7_TECHNICAL.md](V7_TECHNICAL.md)
 
 ---
 

@@ -56,8 +56,7 @@ class BotConnector:
                 connect_url = self._get_connection_url()
                 self.websocket = await websockets.connect(
                     connect_url,
-                    ping_interval=20,
-                    ping_timeout=60,
+                    ping_interval=None,  # 禁用自动ping，NapCat本地连接不需要
                     close_timeout=10
                 )
                 logger.info(f"[Network] 全局连接已建立: {self.ws_url}")

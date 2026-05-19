@@ -52,7 +52,10 @@ def _chat_completion_sync(
     }
 
     if disable_thinking:
-        payload["reasoning_effort"] = "low"
+        # reasoning_effort 只对推理模型(deepseek-reasoner)有效
+        # deepseek-chat 等普通模型不支持此参数，会导致空响应
+        # 暂时不加 reasoning_effort，靠 prompt 控制输出
+        pass
 
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=(10, 60))
@@ -61,11 +64,16 @@ def _chat_completion_sync(
             # 防御性访问：API 可能返回空 choices 或格式异常
             choices = data.get("choices", [])
             if not choices:
-                logger.error("[LLM] API 返回空 choices")
+                logger.error(f"[LLM] API 返回空 choices, response={resp.text[:200]}")
                 return f"{_ERROR_SENTINEL}API 返回空响应）"
             content = choices[0].get("message", {}).get("content", "")
             if not content:
-                logger.error("[LLM] API 返回空 content")
+                # 可能是 reasoning 模型，content 在 reasoning_content 里
+                reasoning = choices[0].get("message", {}).get("reasoning_content", "")
+                if reasoning:
+                    logger.warning("[LLM] content 为空但有 reasoning_content，使用 reasoning")
+                    return reasoning.strip()
+                logger.error(f"[LLM] API 返回空 content, full={resp.text[:300]}")
                 return f"{_ERROR_SENTINEL}API 返回空内容）"
             return content.strip()
         else:
