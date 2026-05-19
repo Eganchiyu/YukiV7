@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 💬 提问与讨论
+  - name: 提问与讨论（Discussions）
     url: https://github.com/Eganchiyu/YukiV7/discussions
     about: 使用过程中的问题请优先到 Discussions 提问，Issue 仅用于 Bug 报告和功能请求

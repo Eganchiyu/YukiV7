@@ -1,4 +1,4 @@
-name: "🚀 特性申请 (Feature Request)"
+name: "特性申请 (Feature Request)"
 description: "为项目提出新的功能想法或改进建议"
 title: "[Feature Request]: " # 自动为用户的 Issue 标题添加前缀
 labels: ["enhancement", "triage"] # 用户提交后，自动打上这些标签
