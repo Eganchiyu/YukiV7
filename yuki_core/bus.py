@@ -445,8 +445,21 @@ class ContextBus:
             logger.error(f"[Bus] 能力执行失败: {e}")
 
     async def _execute_delegate(self, action: Action):
-        """委托小女仆（占位）"""
-        logger.info(f"[Bus] 小女仆委托: {action.content}（占位，待集成）")
+        """委托小女仆 — 通过 maid CapabilityPlugin 执行"""
+        logger.info(f"[Bus] 委托小女仆: {action.content[:80]}")
+        maid = self.capability_plugins.get("maid")
+        if not maid:
+            logger.warning("[Bus] maid 能力插件未注册，无法委托")
+            return
+        try:
+            result = await maid.execute({
+                "task": action.content,
+                "session_id": action.metadata.get("session_id"),
+            })
+            logger.info(f"[Bus] 小女仆返回: {result.get('status')} — {str(result.get('result', ''))[:100]}")
+            return result
+        except Exception as e:
+            logger.error(f"[Bus] 小女仆执行失败: {e}")
 
     # ================= 后台任务 =================
 

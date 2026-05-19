@@ -37,6 +37,13 @@ platforms:
       tts_enabled: false
       tts_model: ''
 capabilities:
+  maid:
+    enabled: true
+    class: plugins.capabilities.maid_plugin.MaidPlugin
+    description: 小女仆自主编程代理
+    config:
+      max_rounds: 20
+      timeout: 60
   web_search:
     enabled: false
     class: plugins.capabilities.web_search.WebSearchPlugin

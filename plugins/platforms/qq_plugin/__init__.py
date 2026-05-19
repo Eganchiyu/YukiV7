@@ -66,7 +66,7 @@ class QQPlugin(PlatformPlugin):
         self.robot_name = ""
         self.keywords = []
 
-        # V6 业务对象（connect 时初始化，类型用字符串注解避免提前导入）
+        # V6 业务对象（_init_business_objects 时初始化，只做一次）
         self.connector = None  # type: Optional[BotConnector]
         self.sender = None  # type: Optional[MessageSender]
         self.parser = None  # type: Optional[CQCodeParser]
@@ -87,10 +87,16 @@ class QQPlugin(PlatformPlugin):
         # WebSocket 监听任务
         self._ws_task: Optional[asyncio.Task] = None
 
+        # 业务对象是否已初始化（防止 connect() 重复初始化）
+        self._business_initialized = False
+
     # ================= 生命周期 =================
 
-    async def connect(self) -> bool:
-        """初始化 V6 业务对象并连接 NapCat"""
+    def _init_business_objects(self):
+        """初始化 V6 业务对象（只做一次，防止 connect() 重连时重复初始化）"""
+        if self._business_initialized:
+            return
+
         logger.info("[QQ] 初始化业务对象...")
 
         # 群聊开关状态
@@ -113,23 +119,29 @@ class QQPlugin(PlatformPlugin):
         # 同步系统提示词
         sync_system_prompts(self.history_manager, self.yuki)
 
-        # V6 引擎（用于后台任务：日记、破冰、小女仆）
+        # 事件队列
+        self._event_queue = asyncio.Queue()
+
+        self._business_initialized = True
+        logger.info("[QQ] 业务对象初始化完成")
+
+    async def connect(self) -> bool:
+        """连接 NapCat WebSocket（重连时只重建连接，不重复初始化业务对象）"""
+        # 首次调用时初始化业务对象
+        self._init_business_objects()
+
+        # WebSocket 连接（每次 connect 重建）
+        self.connector = BotConnector(self.napcat_ws_url, self.napcat_ws_token)
+        self.sender = MessageSender(self.connector)
+        self.parser = CQCodeParser(self.connector)
+
+        # V6 引擎（每次 connect 重建，因为它依赖 sender）
+        # engine 用于后台任务：日记、破冰、小女仆
         self.engine = YukiEngine(
             self.memory_rag, self.history_manager, self.yuki, self.sender
         )
         self.engine.sticker_manager = self.sticker_manager
         self.engine.process_callback = self._main_process_callback
-
-        # WebSocket 连接
-        self.connector = BotConnector(self.napcat_ws_url, self.napcat_ws_token)
-        self.sender = MessageSender(self.connector)
-        self.parser = CQCodeParser(self.connector)
-
-        # 重新绑定 engine 的 sender
-        self.engine.sender = self.sender
-
-        # 事件队列
-        self._event_queue = asyncio.Queue()
 
         # 预热群组
         for cid in self.target_groups:
@@ -137,7 +149,7 @@ class QQPlugin(PlatformPlugin):
             self.yuki.update_energy(str(cid))
             self.yuki.update_desire_to_reply(str(cid))
 
-        logger.info("[QQ] 业务对象初始化完成")
+        logger.info("[QQ] WebSocket 连接已建立")
         return True
 
     async def disconnect(self) -> None:
