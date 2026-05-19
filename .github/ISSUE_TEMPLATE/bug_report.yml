@@ -1,0 +1,69 @@
+name: Bug Report
+description: 报告一个Bug或问题
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢您对项目的关注！请填写以下信息来帮助我们更好地理解和修复这个Bug。
+  - type: dropdown
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 请选择您的运行环境
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Docker
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Bug描述
+      description: 请清晰简洁地描述这个Bug是什么
+      placeholder: 发生了什么Bug？
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请提供详细的复现步骤，让我们能够重现这个Bug
+      placeholder: |
+        1. 进入 '...'
+        2. 点击 '....'
+        3. 滚动到 '....'
+        4. 出现错误
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+      description: 请描述您期望发生的正确行为
+      placeholder: 应该发生什么？
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 请描述实际发生的错误行为
+      placeholder: 实际发生了什么？
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误日志或截图
+      description: 如果有错误日志或截图，请粘贴在这里
+      render: shell
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+      description: 任何其他与该Bug相关的上下文信息
